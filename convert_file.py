@@ -36,15 +36,22 @@ def guess_format(filename: str) -> str:
 
 
 def convert(args, infile_type, outfile_type):
-    cell = read(args.input, format=infile_type)
+    ase_cell = read(args.input, format=infile_type)
+
+    # lattice_transposed = ase_cell.cell.array.T.flatten()
+    # lattice_string = " ".join(map(str, lattice_transposed))
+    # property_line = (
+    #     f'pbc="T T T" Lattice="{lattice_string}" Properties=species:S:1:pos:R:3'
+    # )
 
     if args.replicate:
         nx, ny, nz = args.replicate
-        supercell = cell.repeat([nx, ny, nz])
+        supercell = ase_cell.repeat([nx, ny, nz])
+        supercell.wrap(eps=1e-12)
         write(args.output, supercell, format=outfile_type)
         return
 
-    write(args.output, cell, format=outfile_type)
+    write(args.output, ase_cell, format=outfile_type)
 
 
 def main() -> None:
