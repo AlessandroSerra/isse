@@ -111,7 +111,7 @@ def convert(args, infile_type, outfile_type):
             format=outfile_type,
             columns=["symbols", "positions", "masses"],
         )
-    elif "vasp" in outfile_type:
+    if "vasp" in outfile_type:
         ase_cell = sort(ase_cell)
 
     else:
