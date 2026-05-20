@@ -6,6 +6,7 @@ from argparse import ArgumentParser
 from glob import glob
 
 try:
+    from ase.build import sort
     from ase.io import read, write
     from ase.io.formats import ioformats
     from ase.io.lammpsdata import write_lammps_data
@@ -110,6 +111,8 @@ def convert(args, infile_type, outfile_type):
             format=outfile_type,
             columns=["symbols", "positions", "masses"],
         )
+    elif "vasp" in outfile_type:
+        ase_cell = sort(ase_cell)
 
     else:
         write(args.output, ase_cell, format=outfile_type)
