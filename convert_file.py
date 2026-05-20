@@ -116,7 +116,7 @@ def convert(args, infile_type, outfile_type):
         )
 
     else:
-        write(args.output, ase_cell, format=outfile_type)
+        write(args.output, ase_cell, format=outfile_type, direct=True)
 
 
 def main() -> None:
