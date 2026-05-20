@@ -7,6 +7,7 @@ from argparse import ArgumentParser
 try:
     from ase.io import read, write
     from ase.io.formats import ioformats
+    from ase.io.lammpsdata import write_lammps_data
 except ImportError:
     print(
         "ASE is needed to use this script. Please install it with your preferred package manager"
@@ -84,6 +85,9 @@ def convert(args, infile_type, outfile_type):
         supercell.wrap(eps=1e-12)
         write(args.output, supercell, format=outfile_type)
         return
+
+    if "lammps-data" in outfile_type:
+        write_lammps_data(args.output, ase_cell, masses=True)
 
     write(args.output, ase_cell, format=outfile_type)
 
