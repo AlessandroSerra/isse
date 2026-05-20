@@ -35,14 +35,48 @@ def guess_format(filename: str) -> str:
     return ext
 
 
+def _write_lammps_alamode(ase_cell, outfile) -> None:
+    """manually write an alamode-compatible lammps dump file"""
+    Natoms = len(ase_cell)
+    positions = ase_cell.get_positions()
+    forces = ase_cell.get_forces()
+    cell_vectors = ase_cell.cell.array
+    thresh = 1e-6
+    cell_vectors[cell_vectors < thresh] = 0.0
+
+    with open(outfile, "w") as f:
+        f.write("ITEM: TIMESTEP\n")
+        f.write("0\n")
+        f.write("ITEM: NUMBER OF ATOMS\n")
+        f.write(f"{Natoms}\n")
+        f.write("ITEM: BOX BOUNDS xy xz yz pp pp pp\n")
+        f.write(
+            f"{cell_vectors[0][0]:.16e} {cell_vectors[0][1]:.16e} {cell_vectors[0][2]:.16e}\n"
+        )
+        f.write(
+            f"{cell_vectors[1][0]:.16e} {cell_vectors[1][1]:.16e} {cell_vectors[1][2]:.16e}\n"
+        )
+        f.write(
+            f"{cell_vectors[2][0]:.16e} {cell_vectors[2][1]:.16e} {cell_vectors[2][2]:.16e}\n"
+        )
+        f.write("ITEM: ATOMS id xu yu zu fx fy fz\n")
+
+        for idx in range(Natoms):
+            f.write(f"{idx}\t")
+            f.write(
+                f"{positions[idx][0]:.16f}\t{positions[idx][1]:.16f}\t{positions[idx][2]:.16f}\t"
+            )
+            f.write(
+                f"{forces[idx][0]:.16f}\t{forces[idx][1]:.16f}\t{forces[idx][2]:.16f}\n"
+            )
+
+
 def convert(args, infile_type, outfile_type):
     ase_cell = read(args.input, format=infile_type)
 
-    # lattice_transposed = ase_cell.cell.array.T.flatten()
-    # lattice_string = " ".join(map(str, lattice_transposed))
-    # property_line = (
-    #     f'pbc="T T T" Lattice="{lattice_string}" Properties=species:S:1:pos:R:3'
-    # )
+    if "alm.lmp" in outfile_type:
+        _write_lammps_alamode(ase_cell, args.output)
+        return
 
     if args.replicate:
         nx, ny, nz = args.replicate
@@ -104,7 +138,7 @@ def main() -> None:
         sys.exit(1)
 
     outfile_type = args.output_type if args.output_type else guess_format(args.output)
-    if outfile_type not in ioformats:
+    if outfile_type not in ioformats and "alm.lmp" not in outfile_type:
         print(f"Error: Unsupported or unrecognized output format '{outfile_type}'.")
         print_available_formats()
         sys.exit(1)
