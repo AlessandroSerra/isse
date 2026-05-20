@@ -62,7 +62,7 @@ def _write_lammps_alamode(ase_cell, outfile) -> None:
         )
         f.write("ITEM: ATOMS id xu yu zu fx fy fz\n")
 
-        for idx in range(Natoms):
+        for idx in range(1, Natoms + 1):
             f.write(f"{idx}\t")
             f.write(
                 f"{positions[idx][0]:.16f}\t{positions[idx][1]:.16f}\t{positions[idx][2]:.16f}\t"
@@ -83,13 +83,12 @@ def convert(args, infile_type, outfile_type):
 
     if "lammps-data" in outfile_type:
         write_lammps_data(args.output, ase_cell, masses=True)
-        return
 
-    if "alm.lmp" in outfile_type:
+    elif "alm.lmp" in outfile_type:
         _write_lammps_alamode(ase_cell, args.output)
-        return
 
-    write(args.output, ase_cell, format=outfile_type)
+    else:
+        write(args.output, ase_cell, format=outfile_type)
 
 
 def main() -> None:
