@@ -3,6 +3,7 @@
 import os
 import sys
 from argparse import ArgumentParser
+from glob import glob
 
 try:
     from ase.io import read, write
@@ -99,62 +100,104 @@ def convert(args, infile_type, outfile_type):
         write(args.output, ase_cell, format=outfile_type)
 
 
+def derive_output(input_path: str, outfile_type: str) -> str:
+    """Derive an output filename from the input path and desired output type."""
+    # Map ASE format names to sensible file extensions
+    ext_map = {
+        "extxyz": "xyz",
+        "lammps-data": "lmp",
+        "poscar": "POSCAR",
+        "cif": "cif",
+        "espresso-in": "pwi",
+        "espresso-out": "pwo",
+        # add more mappings as needed
+    }
+    ext = ext_map.get(outfile_type, outfile_type)
+    base = os.path.splitext(input_path)[0]
+    return f"{base}.{ext}"
+
+
 def main() -> None:
     parser = ArgumentParser(
         description="Script to convert atomic structure file formats."
     )
 
-    # Positional arguments (No flags required)
     parser.add_argument(
         "input",
         type=str,
-        help="Path to the input file",
+        nargs="+",  # ← accept one or more inputs
+        help="Path(s) to input file(s). Supports glob patterns (e.g. 'file*.xyz')",
     )
     parser.add_argument(
         "output",
         type=str,
-        help="Path to the output file",
-    )
-
-    # Optional type overrides
-    parser.add_argument(
-        "-it",
-        "--input-type",
-        type=str,
+        nargs="?",  # ← now optional for multi-file mode
         default=None,
-        help="Force format of the input file. If omitted, guessed from extension.",
+        help="Output file path. Required for single-file conversion; "
+        "omit when using glob patterns (output names are derived automatically).",
     )
-    parser.add_argument(
-        "-ot",
-        "--output-type",
-        type=str,
-        default=None,
-        help="Force format of the output file. If omitted, guessed from extension.",
-    )
+    parser.add_argument("-it", "--input-type", type=str, default=None)
+    parser.add_argument("-ot", "--output-type", type=str, default=None)
     parser.add_argument(
         "-r",
         "--replicate",
         type=int,
         nargs=3,
         metavar=("nx", "ny", "nz"),
-        help="Generate a supercell by replicating the system along x, y, and z axes (e.g., -r 3 3 3)",
+        help="Replicate the cell along x, y, z (e.g. -r 3 3 3)",
     )
 
     args = parser.parse_args()
 
-    infile_type = args.input_type if args.input_type else guess_format(args.input)
-    if infile_type not in ioformats:
-        print(f"Error: Unsupported or unrecognized input format '{infile_type}'.")
-        print_available_formats()
+    # ── Expand globs ──────────────────────────────────────────────────────────
+    input_files = []
+    for pattern in args.input:
+        matches = glob(pattern)
+        if not matches:
+            print(f"Warning: no files matched pattern '{pattern}', skipping.")
+        input_files.extend(sorted(matches))
+
+    if not input_files:
+        print("Error: no input files found.")
         sys.exit(1)
 
-    outfile_type = args.output_type if args.output_type else guess_format(args.output)
-    if outfile_type not in ioformats and "alm.lmp" not in outfile_type:
-        print(f"Error: Unsupported or unrecognized output format '{outfile_type}'.")
-        print_available_formats()
+    # ── Validate: single-file mode requires an explicit output path ───────────
+    if len(input_files) == 1 and args.output:
+        pairs = [(input_files[0], args.output)]
+    elif len(input_files) > 1 and args.output:
+        print(
+            "Error: an explicit output path can only be used with a single input file."
+        )
         sys.exit(1)
+    else:
+        # Multi-file (or single without explicit output): derive names
+        if not args.output_type:
+            print(
+                "Error: --output-type/-ot is required when using glob / no explicit output path."
+            )
+            sys.exit(1)
+        pairs = [(f, derive_output(f, args.output_type)) for f in input_files]
 
-    convert(args, infile_type, outfile_type)
+    # ── Convert each pair ─────────────────────────────────────────────────────
+    for infile, outfile in pairs:
+        infile_type = args.input_type or guess_format(infile)
+        outfile_type = args.output_type or guess_format(outfile)
+
+        if infile_type not in ioformats:
+            print(f"Error: unrecognized input format '{infile_type}' for '{infile}'.")
+            print_available_formats()
+            sys.exit(1)
+        if outfile_type not in ioformats and "alm.lmp" not in outfile_type:
+            print(
+                f"Error: unrecognized output format '{outfile_type}' for '{outfile}'."
+            )
+            print_available_formats()
+            sys.exit(1)
+
+        print(f"  {infile}  →  {outfile}")
+        args.input = infile  # reuse existing convert() without changes
+        args.output = outfile
+        convert(args, infile_type, outfile_type)
 
 
 if __name__ == "__main__":
