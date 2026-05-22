@@ -108,6 +108,9 @@ def convert(args, infile_type, outfile_type):
         _write_lammps_alamode(ase_cell, args.output)
 
     elif "extxyz" in outfile_type:
+        ase_cell.set_masses(
+            ase_cell.get_masses()
+        )  # weird but necessary to populate the "masses" column
         write(
             args.output,
             ase_cell,
