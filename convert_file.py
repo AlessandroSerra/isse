@@ -5,8 +5,12 @@ import sys
 from argparse import ArgumentParser
 from glob import glob
 
+import numpy as np
+
 try:
+    from ase import Atom, Atoms
     from ase.build import sort
+    from ase.calculators.singlepoint import SinglePointCalculator
     from ase.io import read, write
     from ase.io.formats import ioformats
     from ase.io.lammpsdata import write_lammps_data
@@ -45,7 +49,7 @@ def _write_lammps_alamode(ase_cell, outfile) -> None:
     forces = ase_cell.get_forces()
     cell_vectors = ase_cell.cell.array
     thresh = 1e-6
-    cell_vectors[cell_vectors < thresh] = 0.0
+    cell_vectors[np.abs(cell_vectors) < thresh] = 0.0
 
     with open(outfile, "w") as f:
         f.write("ITEM: TIMESTEP\n")
@@ -74,6 +78,33 @@ def _write_lammps_alamode(ase_cell, outfile) -> None:
             )
 
 
+def _read_lammps_alamode(infile: str):
+
+    with open(infile) as f:
+        lines = f.readlines()
+
+    Natoms = int(lines[3])
+    cell_lines = lines[5:8]
+    cell = np.array([list(map(float, line.split())) for line in cell_lines])
+
+    positions = np.zeros((Natoms, 3), dtype=np.float64)
+    forces = np.zeros((Natoms, 3), dtype=np.float64)
+
+    offset = 9
+    atom_lines = lines[offset : offset + Natoms]
+
+    for i, line in enumerate(atom_lines):
+        cols = np.array(line.split(), dtype=np.float64)
+        positions[i] = cols[1:4]
+        forces[i] = cols[4:7]
+
+    atoms = Atoms(positions=positions, cell=cell, pbc=True)
+    calc = SinglePointCalculator(atoms, forces=forces)
+    atoms.calc = calc
+
+    return atoms
+
+
 def derive_output(input_path: str, outfile_type: str) -> str:
     """Derive an output filename from the input path and desired output type."""
     ext_map = {
@@ -90,7 +121,11 @@ def derive_output(input_path: str, outfile_type: str) -> str:
 
 
 def convert(args, infile_type, outfile_type):
-    ase_cell = read(args.input, format=infile_type)
+
+    if infile_type in ("lammpstrj", "alm.lmp"):
+        ase_cell = _read_lammps_alamode(args.input)
+    else:
+        ase_cell = read(args.input, format=infile_type)
 
     if args.replicate:
         nx, ny, nz = args.replicate
@@ -104,7 +139,7 @@ def convert(args, infile_type, outfile_type):
     if "lammps-data" in outfile_type:
         write_lammps_data(args.output, ase_cell, masses=True)
 
-    elif "alm.lmp" in outfile_type:
+    elif outfile_type in ("alm.lmp", "lammpstrj"):
         _write_lammps_alamode(ase_cell, args.output)
 
     elif "extxyz" in outfile_type:
@@ -206,7 +241,7 @@ def main() -> None:
             print_available_formats()
             sys.exit(1)
 
-        if outfile_type not in ioformats and "alm.lmp" not in outfile_type:
+        if outfile_type not in ioformats and outfile_type not in ("alm.lmp", "lammpstrj"):
             print(
                 f"Error: unrecognized output format '{outfile_type}' for '{outfile}'."
             )
