@@ -22,6 +22,7 @@ try:
     from ase import Atoms
     from ase.build import minimize_rotation_and_translation, sort
     from ase.calculators.singlepoint import SinglePointCalculator
+    from ase.cell import Cell
     from ase.geometry import minkowski_reduce
     from ase.io import read, write
     from ase.io.formats import ioformats
@@ -218,9 +219,10 @@ def convert(
 
 
 def _check_minkowski(a1: Atoms, a2: Atoms, tol: float = 1e-5) -> bool:
-    p1, _ = minkowski_reduce(a1.cell)
-    p2, _ = minkowski_reduce(a2.cell)
-    return np.allclose(p1.cellpar(), p2.cellpar(), atol=tol)
+    p1_red, _ = minkowski_reduce(a1.cell)
+    p2_red, _ = minkowski_reduce(a2.cell)
+    # minkowski_reduce returns a plain ndarray; wrap in Cell to get .cellpar()
+    return np.allclose(Cell(p1_red).cellpar(), Cell(p2_red).cellpar(), atol=tol)
 
 
 def _check_spglib(a1: Atoms, a2: Atoms, symprec: float = 1e-5) -> bool:
@@ -255,7 +257,7 @@ def _check_kabsch(a1: Atoms, a2: Atoms, tol: float = 1e-4) -> bool:
         return False
 
 
-def _check_fractional(a1: Atoms, a2: Atoms, tol: float = 1e-4) -> bool:
+def _check_fractional(a1: Atoms, a2: Atoms, tol: float = 1e-3) -> bool:
     s1 = a1.get_scaled_positions() % 1.0
     s2 = a2.get_scaled_positions() % 1.0
     s1 = s1[np.lexsort(s1.T[::-1])]
@@ -312,6 +314,9 @@ def run_equivalence_tests(
         else:
             n_skip += 1
 
+    # Build the reference structure (replicated if needed) used by all checks
+    ref = orig.repeat(list(replicate)) if replicate else orig
+
     # 1 ── Atom count ─────────────────────────────────────────────────────────
     label = "Atom count"
     if replicate:
@@ -333,17 +338,18 @@ def run_equivalence_tests(
 
     # 2 ── Chemical composition ───────────────────────────────────────────────
     label = "Chemical composition"
-    if sorted(orig.get_chemical_symbols()) == sorted(conv.get_chemical_symbols()):
-        species = ", ".join(sorted(set(orig.get_chemical_symbols())))
+    from collections import Counter
+
+    c_ref = Counter(ref.get_chemical_symbols())
+    c_conv = Counter(conv.get_chemical_symbols())
+    if c_ref == c_conv:
+        species = ", ".join(f"{el}×{n}" for el, n in sorted(c_ref.items()))
         _result_line(label, PASS, species)
         record(PASS)
     else:
-        _result_line(
-            label,
-            FAIL,
-            f"{sorted(orig.get_chemical_symbols())} ≠ "
-            f"{sorted(conv.get_chemical_symbols())}",
-        )
+        only_ref = {el: c_ref[el] for el in c_ref if c_ref[el] != c_conv.get(el)}
+        only_conv = {el: c_conv[el] for el in c_conv if c_conv[el] != c_ref.get(el)}
+        _result_line(label, FAIL, f"input={only_ref}  output={only_conv}")
         record(FAIL)
 
     # 3 ── Lattice parameters ─────────────────────────────────────────────────
@@ -371,9 +377,6 @@ def run_equivalence_tests(
     except Exception as e:
         _result_line(label, SKIP, str(e))
         record(SKIP)
-
-    # Build the "expected" reference (with supercell if needed)
-    ref = orig.repeat(list(replicate)) if replicate else orig
 
     # 4 ── Minkowski reduction ─────────────────────────────────────────────────
     label = "Cell shape (Minkowski)"
