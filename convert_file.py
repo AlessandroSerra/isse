@@ -312,11 +312,7 @@ def _result_line(label: str, badge: str, detail: str = "") -> None:
 
 
 def run_equivalence_tests(
-    orig: Atoms,
-    conv: Atoms,
-    infile: str,
-    outfile: str,
-    replicate: tuple | None = None,
+    orig: Atoms, conv: Atoms, infile: str, outfile: str, replicate: tuple | None = None
 ) -> bool:
     """
     Run all equivalence checks between *orig* (input) and *conv* (output).
@@ -334,7 +330,7 @@ def run_equivalence_tests(
         if outfile_type in ("lammpstrj", "alm.lmp"):
             conv_disk = _read_lammps_alamode(outfile)
         else:
-            conv_disk = read(outfile)
+            conv_disk = read(outfile, format=outfile_type)
         conv = conv_disk
     except Exception as e:
         print(f"  {WARN} Could not re-read output for verification: {e}")
