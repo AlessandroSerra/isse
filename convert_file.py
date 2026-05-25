@@ -89,13 +89,13 @@ def print_available_formats() -> None:
         print(f"{name:<18} | {fmt.description}")
 
 
-def guess_format(filename: str) -> str:
-    """Guess the ASE format from a filename."""
-    base = os.path.basename(filename).lower()
-    if "poscar" in base or "contcar" in base:
-        return "vasp"
-    ext = os.path.splitext(base)[1].strip(".")
-    return "extxyz" if ext == "xyz" else ext
+# def guess_format(filename: str) -> str:
+#     """Guess the ASE format from a filename."""
+#     base = os.path.basename(filename).lower()
+#     if "poscar" in base or "contcar" in base:
+#         return "vasp"
+#     ext = os.path.splitext(base)[1].strip(".")
+#     return "extxyz" if ext == "xyz" else ext
 
 
 def derive_output(input_path: str, outfile_type: str) -> str:
@@ -312,7 +312,12 @@ def _result_line(label: str, badge: str, detail: str = "") -> None:
 
 
 def run_equivalence_tests(
-    orig: Atoms, conv: Atoms, infile: str, outfile: str, replicate: tuple | None = None
+    orig: Atoms,
+    conv: Atoms,
+    infile: str,
+    outfile: str,
+    outfile_type: str,
+    replicate: tuple | None = None,
 ) -> bool:
     """
     Run all equivalence checks between *orig* (input) and *conv* (output).
@@ -326,7 +331,7 @@ def run_equivalence_tests(
 
     # Try to read the written file back so we test what was actually saved on disk
     try:
-        outfile_type = guess_format(outfile)
+        # outfile_type = guess_format(outfile)
         if outfile_type in ("lammpstrj", "alm.lmp"):
             conv_disk = _read_lammps_alamode(outfile)
         else:
@@ -576,8 +581,8 @@ def main() -> None:
     any_test_failed = False
 
     for infile, outfile in pairs:
-        infile_type = args.input_type or guess_format(infile)
-        outfile_type = args.output_type or guess_format(outfile)
+        infile_type = args.input_type  # or guess_format(infile)
+        outfile_type = args.output_type  # or guess_format(outfile)
 
         if infile_type not in ioformats:
             print(
@@ -632,6 +637,7 @@ def main() -> None:
                     None,  # conv=None → re-read from disk inside
                     infile,
                     outfile,
+                    outfile_type,
                     replicate=args.replicate,
                 )
                 if not ok:
