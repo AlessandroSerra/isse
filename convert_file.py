@@ -157,12 +157,36 @@ def _read_lammps_alamode(infile: str) -> Atoms:
     positions = np.zeros((Natoms, 3))
     forces = np.zeros((Natoms, 3))
 
-    for i, line in enumerate(lines[9 : 9 + Natoms]):
+    offset = 9
+
+    for i, line in enumerate(lines[offset : offset + Natoms]):
         cols = np.array(line.split(), dtype=np.float64)
         positions[i] = cols[1:4]
         forces[i] = cols[4:7]
 
     atoms = Atoms(positions=positions, cell=cell, pbc=True)
+    atoms.calc = SinglePointCalculator(atoms, forces=forces)
+    return atoms
+
+
+def _read_xyz_alamode(infile: str) -> Atoms:
+    """Read extxyz dump but return the unwrapped positions instead of the wrapped ones."""
+    with open(infile) as f:
+        lines = f.readlines()
+
+    Natoms = int(lines[0])
+    unwrapped_positions = np.zeros((Natoms, 3), dtype=np.float64)
+    forces = np.zeros((Natoms, 3), dtype=np.float64)
+    atoms = read(infile, format="extxyz")
+
+    offset = 2
+
+    for i, line in enumerate(lines[offset : offset + Natoms]):
+        cols = line.split()
+        forces[i] = cols[4:7]
+        unwrapped_positions[i] = cols[7:10]
+
+    atoms.set_positions(unwrapped_positions)
     atoms.calc = SinglePointCalculator(atoms, forces=forces)
     return atoms
 
@@ -182,8 +206,12 @@ def convert(
     """
     Convert *infile* → *outfile* and return the resulting ASE Atoms object.
     """
+
     if infile_type in ("lammpstrj", "alm.lmp"):
         ase_cell = _read_lammps_alamode(infile)
+
+    elif infile_type in ("alm.xyz"):
+        ase_cell = _read_xyz_alamode(infile)
     else:
         ase_cell = read(infile, format=infile_type)
 
@@ -584,7 +612,7 @@ def main() -> None:
         infile_type = args.input_type  # or guess_format(infile)
         outfile_type = args.output_type  # or guess_format(outfile)
 
-        if infile_type not in ioformats:
+        if infile_type not in ioformats and infile_type not in ("alm.xyz"):
             print(
                 f"  {red('Error:')} Unrecognized input format '{infile_type}' for '{infile}'."
             )
@@ -610,6 +638,8 @@ def main() -> None:
         try:
             if infile_type in ("lammpstrj", "alm.lmp"):
                 orig_atoms = _read_lammps_alamode(infile)
+            elif infile_type in ("alm.xyz"):
+                orig_atoms = _read_xyz_alamode(infile)
             else:
                 orig_atoms = read(infile, format=infile_type)
         except Exception as e:
