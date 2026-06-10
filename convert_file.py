@@ -185,7 +185,7 @@ def _read_lammps_dump(infile: str):
             id_[i] = int(parts[col["id"]])
 
         if mass is not None:
-            m = int(parts[col["mass"]])
+            m = float(parts[col["mass"]])
             mass[i] = m
             sym = MASS_TO_SYMBOL[m]
             symbols.append(sym)
