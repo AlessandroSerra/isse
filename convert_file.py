@@ -16,6 +16,7 @@ from argparse import ArgumentParser
 from glob import glob
 
 import numpy as np
+from ase.symbols import Symbols
 
 # ── ASE ──────────────────────────────────────────────────────────────────────
 try:
@@ -23,6 +24,7 @@ try:
     from ase.build import minimize_rotation_and_translation, sort
     from ase.calculators.singlepoint import SinglePointCalculator
     from ase.cell import Cell
+    from ase.data import atomic_masses, chemical_symbols
     from ase.geometry import minkowski_reduce
     from ase.io import read, write
     from ase.io.formats import ioformats
@@ -89,15 +91,6 @@ def print_available_formats() -> None:
         print(f"{name:<18} | {fmt.description}")
 
 
-# def guess_format(filename: str) -> str:
-#     """Guess the ASE format from a filename."""
-#     base = os.path.basename(filename).lower()
-#     if "poscar" in base or "contcar" in base:
-#         return "vasp"
-#     ext = os.path.splitext(base)[1].strip(".")
-#     return "extxyz" if ext == "xyz" else ext
-
-
 def derive_output(input_path: str, outfile_type: str) -> str:
     """Derive an output filename from the input path and desired output type."""
     ext_map = {
@@ -119,6 +112,8 @@ def derive_output(input_path: str, outfile_type: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # LAMMPS / ALAMOde custom I/O
 # ─────────────────────────────────────────────────────────────────────────────
+
+MASS_TO_SYMBOL = {round(m, 3): sym for m, sym in zip(atomic_masses, chemical_symbols)}
 
 
 def _write_lammps_alamode(ase_cell: Atoms, outfile: str) -> None:
@@ -147,25 +142,84 @@ def _write_lammps_alamode(ase_cell: Atoms, outfile: str) -> None:
             )
 
 
-def _read_lammps_alamode(infile: str) -> Atoms:
-    """Read an ALAMode-compatible LAMMPS dump file."""
+def _read_lammps_dump(infile: str):
+
     with open(infile) as f:
         lines = f.readlines()
 
     Natoms = int(lines[3])
-    cell = np.array([list(map(float, l.split())) for l in lines[5:8]])
-    positions = np.zeros((Natoms, 3))
-    forces = np.zeros((Natoms, 3))
+    cell = np.array([list(map(float, line.split())) for line in lines[5:8]])
 
-    offset = 9
+    attributes = lines[8].split()[2:]
+    col = {name: i for i, name in enumerate(attributes)}
 
-    for i, line in enumerate(lines[offset : offset + Natoms]):
-        cols = np.array(line.split(), dtype=np.float64)
-        positions[i] = cols[1:4]
-        forces[i] = cols[4:7]
+    def _has(*args):
+        return all(a in col for a in args)
 
-    atoms = Atoms(positions=positions, cell=cell, pbc=True)
-    atoms.calc = SinglePointCalculator(atoms, forces=forces)
+    if _has("xu", "yu", "zu"):
+        pos_key = ("xu", "yu", "zu")
+    elif _has("xs", "ys", "zs"):
+        pos_key = ("xs", "ys", "zs")
+    elif _has("x", "y", "z"):
+        pos_key = ("x", "y", "z")
+    else:
+        raise ValueError(f"ERROR: no positions field found in {infile}.\n")
+
+    pos = np.zeros((Natoms, 3))
+    vel = np.zeros((Natoms, 3)) if _has("vx", "vy", "vz") else None
+    force = np.zeros((Natoms, 3)) if _has("fx", "fy", "fz") else None
+    id_ = np.zeros(Natoms, dtype=int) if "id" in col else None
+    mass = np.zeros(Natoms, dtype=float) if "mass" in col else None
+    symbols = []
+
+    for i in range(Natoms):
+        parts = lines[9 + i].split()
+
+        pos[i] = [
+            float(parts[col[pos_key[0]]]),
+            float(parts[col[pos_key[1]]]),
+            float(parts[col[pos_key[2]]]),
+        ]
+
+        if id_ is not None:
+            id_[i] = int(parts[col["id"]])
+
+        if mass is not None:
+            m = int(parts[col["mass"]])
+            mass[i] = m
+            sym = MASS_TO_SYMBOL[m]
+            symbols.append(sym)
+
+        if vel is not None:
+            vel[i] = [
+                float(parts[col["vx"]]),
+                float(parts[col["vy"]]),
+                float(parts[col["vz"]]),
+            ]
+
+        if force is not None:
+            force[i] = [
+                float(parts[col["fx"]]),
+                float(parts[col["fy"]]),
+                float(parts[col["fz"]]),
+            ]
+
+    if mass is not None:
+        atoms = Atoms(symbols=symbols, positions=pos, cell=cell, pbc=True)
+        atoms.info["has_masses"] = True
+        atoms.set_masses(mass)
+    else:
+        atoms = Atoms(positions=pos, cell=cell, pbc=True)
+
+    if vel is not None:
+        atoms.set_velocities(vel)
+
+    if force is not None:
+        atoms.calc = SinglePointCalculator(atoms, forces=force)
+
+    if id_ is not None:
+        atoms.set_array("id", id_)
+
     return atoms
 
 
@@ -208,7 +262,7 @@ def convert(
     """
 
     if infile_type in ("lammpstrj", "alm.lmp"):
-        ase_cell = _read_lammps_alamode(infile)
+        ase_cell = _read_lammps_dump(infile)
 
     elif infile_type in ("alm.xyz"):
         ase_cell = _read_xyz_alamode(infile)
@@ -229,12 +283,15 @@ def convert(
         _write_lammps_alamode(ase_cell, outfile)
     elif "extxyz" in outfile_type:
         ase_cell.set_masses(ase_cell.get_masses())
-        write(
-            outfile,
-            ase_cell,
-            format=outfile_type,
-            columns=["symbols", "positions", "masses"],
+
+        has_masses = ase_cell.info.get("has_masses", False)
+        columns = (
+            ["symbols", "positions", "masses"]
+            if has_masses
+            else ["symbols", "positions"]
         )
+
+        write(outfile, ase_cell, format=outfile_type, columns=columns)
     else:
         write(outfile, ase_cell, format=outfile_type, direct=True)
 
@@ -361,7 +418,7 @@ def run_equivalence_tests(
     try:
         # outfile_type = guess_format(outfile)
         if outfile_type in ("lammpstrj", "alm.lmp"):
-            conv_disk = _read_lammps_alamode(outfile)
+            conv_disk = _read_lammps_dump(outfile)
         else:
             conv_disk = read(outfile, format=outfile_type)
         conv = conv_disk
@@ -612,7 +669,7 @@ def main() -> None:
         infile_type = args.input_type  # or guess_format(infile)
         outfile_type = args.output_type  # or guess_format(outfile)
 
-        if infile_type not in ioformats and infile_type not in ("alm.xyz"):
+        if infile_type not in ioformats and infile_type not in ("alm.xyz", "lammpstrj"):
             print(
                 f"  {red('Error:')} Unrecognized input format '{infile_type}' for '{infile}'."
             )
@@ -637,7 +694,7 @@ def main() -> None:
         # Re-read the original *before* conversion so tests can compare
         try:
             if infile_type in ("lammpstrj", "alm.lmp"):
-                orig_atoms = _read_lammps_alamode(infile)
+                orig_atoms = _read_lammps_dump(infile)
             elif infile_type in ("alm.xyz"):
                 orig_atoms = _read_xyz_alamode(infile)
             else:
