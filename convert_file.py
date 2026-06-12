@@ -6,6 +6,7 @@ Supported workflows:
   Single file:   convert_file.py input.xyz -o output.lmp
   Glob pattern:  convert_file.py "*.xyz" -ot lammps-data
   Supercell:     convert_file.py POSCAR -o super.xyz -r 3 3 3
+  Fractional:    convert_file.py input.lmp -it lammps-data -ot alm.lmp --frac
   Skip tests:    convert_file.py input.xyz -o output.lmp --skip-tests
 """
 
@@ -16,7 +17,6 @@ from argparse import ArgumentParser
 from glob import glob
 
 import numpy as np
-from ase.symbols import Symbols
 
 # ── ASE ──────────────────────────────────────────────────────────────────────
 try:
@@ -33,13 +33,14 @@ except ImportError:
     print("ASE is needed. Install it with: pip install ase")
     sys.exit(1)
 
-# ── spglib (optional — symmetry test is skipped if absent) ───────────────────
+# ── spglib optional ──────────────────────────────────────────────────────────
 try:
     import spglib
 
     _HAS_SPGLIB = True
 except ImportError:
     _HAS_SPGLIB = False
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ANSI colours
@@ -109,30 +110,80 @@ def derive_output(input_path: str, outfile_type: str) -> str:
     return f"{base}.{ext}"
 
 
+def _read_input_atoms(infile: str, infile_type: str) -> Atoms:
+    """Read input structure, including custom formats."""
+    if infile_type in ("lammpstrj", "alm.lmp"):
+        return _read_lammps_dump(infile)
+    if infile_type == "alm.xyz":
+        return _read_xyz_alamode(infile)
+    return read(infile, format=infile_type)
+
+
+def _read_output_atoms(outfile: str, outfile_type: str) -> Atoms:
+    """Read written output structure for equivalence tests."""
+    if outfile_type in ("lammpstrj", "alm.lmp"):
+        return _read_lammps_dump(outfile)
+    return read(outfile, format=outfile_type)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# LAMMPS / ALAMOde custom I/O
+# LAMMPS / ALAMODE custom I/O
 # ─────────────────────────────────────────────────────────────────────────────
 
 MASS_TO_SYMBOL = {round(m, 3): sym for m, sym in zip(atomic_masses, chemical_symbols)}
 
 
-def _write_lammps_alamode(ase_cell: Atoms, outfile: str) -> None:
-    """Write an ALAMode-compatible LAMMPS dump file."""
-    Natoms = len(ase_cell)
-    positions = ase_cell.get_positions()
-    forces = ase_cell.get_forces()
+def _forces_or_zeros(atoms: Atoms) -> np.ndarray:
+    """Return forces if available, otherwise zeros."""
+    try:
+        return atoms.get_forces()
+    except Exception:
+        return np.zeros((len(atoms), 3), dtype=float)
+
+
+def _write_lammps_alamode(
+    ase_cell: Atoms,
+    outfile: str,
+    fractional: bool = False,
+) -> None:
+    """
+    Write an ALAMODE-compatible LAMMPS dump file.
+
+    If fractional=False:
+        writes xu yu zu
+    If fractional=True:
+        writes xs ys zs
+    """
+    natoms = len(ase_cell)
+
+    if fractional:
+        positions = ase_cell.get_scaled_positions(wrap=False)
+        pos_header = "xs ys zs"
+    else:
+        positions = ase_cell.get_positions()
+        pos_header = "xu yu zu"
+
+    forces = _forces_or_zeros(ase_cell)
+
     cell = ase_cell.cell.array.copy()
-    cell[np.abs(cell) < 1e-6] = 0.0
+    cell[np.abs(cell) < 1e-12] = 0.0
 
     with open(outfile, "w") as f:
         f.write("ITEM: TIMESTEP\n0\n")
         f.write("ITEM: NUMBER OF ATOMS\n")
-        f.write(f"{Natoms}\n")
+        f.write(f"{natoms}\n")
         f.write("ITEM: BOX BOUNDS xy xz yz pp pp pp\n")
+
+        # NOTE:
+        # This keeps your original convention: write the three cell-vector rows.
+        # It is not the canonical LAMMPS BOX BOUNDS restricted-triclinic format,
+        # but it matches the paired custom reader in this script.
         for row in cell:
             f.write(f"{row[0]:.16e} {row[1]:.16e} {row[2]:.16e}\n")
-        f.write("ITEM: ATOMS id xu yu zu fx fy fz\n")
-        for i in range(Natoms):
+
+        f.write(f"ITEM: ATOMS id {pos_header} fx fy fz\n")
+
+        for i in range(natoms):
             p = positions[i]
             fv = forces[i]
             f.write(
@@ -144,7 +195,6 @@ def _write_lammps_alamode(ase_cell: Atoms, outfile: str) -> None:
 
 def _read_lammps_box_bounds(lines):
     header = lines[4].split()
-
     raw = np.array([list(map(float, line.split())) for line in lines[5:8]])
 
     # Orthogonal box
@@ -190,17 +240,15 @@ def _read_lammps_box_bounds(lines):
     )
 
     origin = np.array([xlo, ylo, zlo])
-
     return cell, origin
 
 
-def _read_lammps_dump(infile: str):
-
+def _read_lammps_dump(infile: str) -> Atoms:
     with open(infile) as f:
         lines = f.readlines()
 
-    Natoms = int(lines[3])
-    cell, _ = _read_lammps_box_bounds(lines)
+    natoms = int(lines[3])
+    cell, origin = _read_lammps_box_bounds(lines)
 
     attributes = lines[8].split()[2:]
     col = {name: i for i, name in enumerate(attributes)}
@@ -210,24 +258,29 @@ def _read_lammps_dump(infile: str):
 
     if _has("xu", "yu", "zu"):
         pos_key = ("xu", "yu", "zu")
-    elif _has("xs", "ys", "zs"):
-        pos_key = ("xs", "ys", "zs")
+        pos_is_fractional = False
     elif _has("x", "y", "z"):
         pos_key = ("x", "y", "z")
+        pos_is_fractional = False
+    elif _has("xs", "ys", "zs"):
+        pos_key = ("xs", "ys", "zs")
+        pos_is_fractional = True
     else:
-        raise ValueError(f"ERROR: no positions field found in {infile}.\n")
+        raise ValueError(f"ERROR: no positions field found in {infile}.")
 
-    pos = np.zeros((Natoms, 3))
-    vel = np.zeros((Natoms, 3)) if _has("vx", "vy", "vz") else None
-    force = np.zeros((Natoms, 3)) if _has("fx", "fy", "fz") else None
-    id_ = np.zeros(Natoms, dtype=int) if "id" in col else None
-    mass = np.zeros(Natoms, dtype=float) if "mass" in col else None
+    pos_raw = np.zeros((natoms, 3), dtype=float)
+    vel = np.zeros((natoms, 3), dtype=float) if _has("vx", "vy", "vz") else None
+    force = np.zeros((natoms, 3), dtype=float) if _has("fx", "fy", "fz") else None
+    id_ = np.zeros(natoms, dtype=int) if "id" in col else None
+    mass = np.zeros(natoms, dtype=float) if "mass" in col else None
+    type_ = np.zeros(natoms, dtype=int) if "type" in col else None
+
     symbols = []
 
-    for i in range(Natoms):
+    for i in range(natoms):
         parts = lines[9 + i].split()
 
-        pos[i] = [
+        pos_raw[i] = [
             float(parts[col[pos_key[0]]]),
             float(parts[col[pos_key[1]]]),
             float(parts[col[pos_key[2]]]),
@@ -236,10 +289,15 @@ def _read_lammps_dump(infile: str):
         if id_ is not None:
             id_[i] = int(parts[col["id"]])
 
+        if type_ is not None:
+            type_[i] = int(parts[col["type"]])
+
         if mass is not None:
             m = float(parts[col["mass"]])
             mass[i] = m
-            sym = MASS_TO_SYMBOL[m]
+            sym = MASS_TO_SYMBOL.get(round(m, 3), None)
+            if sym is None:
+                raise ValueError(f"Could not infer chemical symbol from mass {m}.")
             symbols.append(sym)
 
         if vel is not None:
@@ -256,12 +314,27 @@ def _read_lammps_dump(infile: str):
                 float(parts[col["fz"]]),
             ]
 
+    if pos_is_fractional:
+        positions = pos_raw @ cell
+    else:
+        positions = pos_raw - origin
+
     if mass is not None:
-        atoms = Atoms(symbols=symbols, positions=pos, cell=cell, pbc=True)
+        atoms = Atoms(symbols=symbols, positions=positions, cell=cell, pbc=True)
         atoms.info["has_masses"] = True
         atoms.set_masses(mass)
     else:
-        atoms = Atoms(positions=pos, cell=cell, pbc=True)
+        if type_ is not None:
+            # Fallback: unknown species. ASE needs atomic numbers/symbols.
+            # Assign H for all atoms but preserve type array.
+            atoms = Atoms(
+                symbols=["H"] * natoms,
+                positions=positions,
+                cell=cell,
+                pbc=True,
+            )
+        else:
+            atoms = Atoms(positions=positions, cell=cell, pbc=True)
 
     if vel is not None:
         atoms.set_velocities(vel)
@@ -272,7 +345,9 @@ def _read_lammps_dump(infile: str):
     if id_ is not None:
         atoms.set_array("id", id_)
 
-    print(atoms.cell.array)
+    if type_ is not None:
+        atoms.set_array("type", type_)
+
     return atoms
 
 
@@ -281,17 +356,17 @@ def _read_xyz_alamode(infile: str) -> Atoms:
     with open(infile) as f:
         lines = f.readlines()
 
-    Natoms = int(lines[0])
-    unwrapped_positions = np.zeros((Natoms, 3), dtype=np.float64)
-    forces = np.zeros((Natoms, 3), dtype=np.float64)
+    natoms = int(lines[0])
+    unwrapped_positions = np.zeros((natoms, 3), dtype=np.float64)
+    forces = np.zeros((natoms, 3), dtype=np.float64)
     atoms = read(infile, format="extxyz")
 
     offset = 2
 
-    for i, line in enumerate(lines[offset : offset + Natoms]):
+    for i, line in enumerate(lines[offset : offset + natoms]):
         cols = line.split()
-        forces[i] = cols[4:7]
-        unwrapped_positions[i] = cols[7:10]
+        forces[i] = [float(x) for x in cols[4:7]]
+        unwrapped_positions[i] = [float(x) for x in cols[7:10]]
 
     atoms.set_positions(unwrapped_positions)
     atoms.calc = SinglePointCalculator(atoms, forces=forces)
@@ -309,18 +384,13 @@ def convert(
     infile_type: str,
     outfile_type: str,
     replicate: tuple | None = None,
+    fractional: bool = False,
 ) -> Atoms:
     """
-    Convert *infile* → *outfile* and return the resulting ASE Atoms object.
+    Convert infile → outfile and return the resulting ASE Atoms object.
     """
 
-    if infile_type in ("lammpstrj", "alm.lmp"):
-        ase_cell = _read_lammps_dump(infile)
-
-    elif infile_type in ("alm.xyz"):
-        ase_cell = _read_xyz_alamode(infile)
-    else:
-        ase_cell = read(infile, format=infile_type)
+    ase_cell = _read_input_atoms(infile, infile_type)
 
     if replicate:
         nx, ny, nz = replicate
@@ -330,42 +400,61 @@ def convert(
     if outfile_type in ("vasp", "poscar"):
         ase_cell = sort(ase_cell)
 
-    if "lammps-data" in outfile_type:
+    if outfile_type == "lammps-data":
+        if fractional:
+            raise ValueError(
+                "--frac is not meaningful for lammps-data: LAMMPS data files "
+                "require Cartesian coordinates in the Atoms section."
+            )
         write_lammps_data(outfile, ase_cell, masses=True)
+
     elif outfile_type in ("alm.lmp", "lammpstrj"):
-        _write_lammps_alamode(ase_cell, outfile)
-    elif "extxyz" in outfile_type:
+        _write_lammps_alamode(ase_cell, outfile, fractional=fractional)
+
+    elif outfile_type == "extxyz":
+        ase_cell = ase_cell.copy()
         ase_cell.set_masses(ase_cell.get_masses())
 
         has_masses = ase_cell.info.get("has_masses", False)
-        columns = (
-            ["symbols", "positions", "masses"]
-            if has_masses
-            else ["symbols", "positions"]
-        )
+
+        if fractional:
+            frac = ase_cell.get_scaled_positions(wrap=False)
+            ase_cell.set_array("frac_pos", frac)
+            columns = (
+                ["symbols", "frac_pos", "masses"]
+                if has_masses
+                else ["symbols", "frac_pos"]
+            )
+        else:
+            columns = (
+                ["symbols", "positions", "masses"]
+                if has_masses
+                else ["symbols", "positions"]
+            )
 
         write(outfile, ase_cell, format=outfile_type, columns=columns)
+
     else:
-        write(outfile, ase_cell, format=outfile_type, direct=True)
+        write(outfile, ase_cell, format=outfile_type, direct=fractional)
 
     return ase_cell
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# EQUIVALENCE CHECKS  (ported from test.py)
+# EQUIVALENCE CHECKS
 # ═════════════════════════════════════════════════════════════════════════════
 
 
 def _check_minkowski(a1: Atoms, a2: Atoms, tol: float = 1e-5) -> bool:
     p1_red, _ = minkowski_reduce(a1.cell)
     p2_red, _ = minkowski_reduce(a2.cell)
-    # minkowski_reduce returns a plain ndarray; wrap in Cell to get .cellpar()
     return np.allclose(Cell(p1_red).cellpar(), Cell(p2_red).cellpar(), atol=tol)
 
 
-def _check_spglib(a1: Atoms, a2: Atoms, symprec: float = 1e-5) -> bool:
+def _check_spglib(a1: Atoms, a2: Atoms, symprec: float = 1e-5) -> bool | None:
     if not _HAS_SPGLIB:
-        return None  # signal: skip
+        return None
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
         ds1 = spglib.get_symmetry_dataset(
@@ -374,12 +463,16 @@ def _check_spglib(a1: Atoms, a2: Atoms, symprec: float = 1e-5) -> bool:
         ds2 = spglib.get_symmetry_dataset(
             (a2.cell, a2.get_scaled_positions(), a2.numbers), symprec=symprec
         )
+
     if ds1 is None or ds2 is None:
         return False
+
     if ds1.number != ds2.number:
         return False
+
     if not np.isclose(a1.get_volume(), a2.get_volume(), rtol=symprec):
         return False
+
     return True
 
 
@@ -399,12 +492,7 @@ def _check_fractional(a1: Atoms, a2: Atoms, tol: float = 1e-3) -> tuple[bool, fl
     """
     Check fractional coordinate equivalence, species by species.
 
-    Uses KDTree nearest-neighbor matching (PBC-aware) instead of lexsort,
-    which is fragile for near-degenerate positions in relaxed structures.
-    For each atom of species Z in a1, finds the closest Z atom in a2
-    (minimum-image distance in fractional coords).  Requires scipy.
-
-    Returns (ok, max_dist).
+    Uses KDTree nearest-neighbor matching with PBC in fractional coordinates.
     """
     try:
         from scipy.spatial import KDTree
@@ -416,25 +504,24 @@ def _check_fractional(a1: Atoms, a2: Atoms, tol: float = 1e-3) -> tuple[bool, fl
 
     s1 = a1.get_scaled_positions() % 1.0
     s2 = a2.get_scaled_positions() % 1.0
-    box = np.ones(3)  # fractional coords live in [0, 1)^3
+    box = np.ones(3)
 
     max_dist = 0.0
+
     for Z in sorted(set(a1.numbers)):
         m1 = a1.numbers == Z
         m2 = a2.numbers == Z
+
         if m1.sum() != m2.sum():
-            return (
-                False,
-                1.0,
-            )  # species count mismatch → caught earlier, but just in case
+            return False, 1.0
 
         p1, p2 = s1[m1], s2[m2]
-        # boxsize enables PBC wrapping in the distance query
+
         tree = KDTree(p2, boxsize=box)
         dists, _ = tree.query(p1)
+
         species_max = float(dists.max())
-        if species_max > max_dist:
-            max_dist = species_max
+        max_dist = max(max_dist, species_max)
 
     return max_dist < tol, max_dist
 
@@ -451,14 +538,14 @@ def _result_line(label: str, badge: str, detail: str = "") -> None:
 
 def run_equivalence_tests(
     orig: Atoms,
-    conv: Atoms,
+    conv: Atoms | None,
     infile: str,
     outfile: str,
     outfile_type: str,
     replicate: tuple | None = None,
 ) -> bool:
     """
-    Run all equivalence checks between *orig* (input) and *conv* (output).
+    Run all equivalence checks between orig and the written output.
     Returns True if every applicable test passed.
     """
     print(
@@ -467,16 +554,14 @@ def run_equivalence_tests(
         )
     )
 
-    # Try to read the written file back so we test what was actually saved on disk
     try:
-        # outfile_type = guess_format(outfile)
-        if outfile_type in ("lammpstrj", "alm.lmp"):
-            conv_disk = _read_lammps_dump(outfile)
-        else:
-            conv_disk = read(outfile, format=outfile_type)
-        conv = conv_disk
+        conv = _read_output_atoms(outfile, outfile_type)
     except Exception as e:
         print(f"  {WARN} Could not re-read output for verification: {e}")
+
+    if conv is None:
+        print(f"  {WARN} No converted structure available for tests.")
+        return False
 
     n_pass = n_fail = n_skip = 0
 
@@ -489,10 +574,9 @@ def run_equivalence_tests(
         else:
             n_skip += 1
 
-    # Build the reference structure (replicated if needed) used by all checks
     ref = orig.repeat(list(replicate)) if replicate else orig
 
-    # 1 ── Atom count ─────────────────────────────────────────────────────────
+    # 1 ── Atom count
     label = "Atom count"
     if replicate:
         nx, ny, nz = replicate
@@ -508,15 +592,16 @@ def run_equivalence_tests(
             _result_line(label, PASS, f"{len(orig)} atoms")
             record(PASS)
         else:
-            _result_line(label, FAIL, f"{len(orig)} (input) ≠ {len(conv)} (output)")
+            _result_line(label, FAIL, f"{len(orig)} input ≠ {len(conv)} output")
             record(FAIL)
 
-    # 2 ── Chemical composition ───────────────────────────────────────────────
+    # 2 ── Chemical composition
     label = "Chemical composition"
     from collections import Counter
 
     c_ref = Counter(ref.get_chemical_symbols())
     c_conv = Counter(conv.get_chemical_symbols())
+
     if c_ref == c_conv:
         species = ", ".join(f"{el}×{n}" for el, n in sorted(c_ref.items()))
         _result_line(label, PASS, species)
@@ -527,15 +612,12 @@ def run_equivalence_tests(
         _result_line(label, FAIL, f"input={only_ref}  output={only_conv}")
         record(FAIL)
 
-    # 3 ── Lattice parameters ─────────────────────────────────────────────────
+    # 3 ── Lattice parameters
     label = "Lattice parameters (a,b,c,α,β,γ)"
     try:
-        p1 = (
-            orig.cell.cellpar()
-            if not replicate
-            else (orig.repeat(list(replicate))).cell.cellpar()
-        )
+        p1 = ref.cell.cellpar()
         p2 = conv.cell.cellpar()
+
         if np.allclose(p1, p2, atol=1e-4):
             _result_line(
                 label,
@@ -546,14 +628,16 @@ def run_equivalence_tests(
             record(PASS)
         else:
             _result_line(
-                label, FAIL, f"input={np.round(p1, 4)} output={np.round(p2, 4)}"
+                label,
+                FAIL,
+                f"input={np.round(p1, 4)} output={np.round(p2, 4)}",
             )
             record(FAIL)
     except Exception as e:
         _result_line(label, SKIP, str(e))
         record(SKIP)
 
-    # 4 ── Minkowski reduction ─────────────────────────────────────────────────
+    # 4 ── Minkowski reduction
     label = "Cell shape (Minkowski)"
     try:
         ok = _check_minkowski(ref, conv)
@@ -563,7 +647,7 @@ def run_equivalence_tests(
         _result_line(label, SKIP, str(e))
         record(SKIP)
 
-    # 5 ── Spglib symmetry ────────────────────────────────────────────────────
+    # 5 ── Spglib symmetry
     label = "Space group + volume (spglib)"
     if not _HAS_SPGLIB:
         _result_line(label, SKIP, "spglib not installed")
@@ -581,8 +665,8 @@ def run_equivalence_tests(
             _result_line(label, SKIP, str(e))
             record(SKIP)
 
-    # 6 ── Fractional coordinates ─────────────────────────────────────────────
-    label = "Fractional coords (PBC-wrapped, sorted)"
+    # 6 ── Fractional coordinates
+    label = "Fractional coords (PBC-wrapped, species-matched)"
     try:
         ok, max_diff = _check_fractional(ref, conv)
         detail = f"max Δ = {max_diff:.2e}"
@@ -592,13 +676,15 @@ def run_equivalence_tests(
         _result_line(label, SKIP, str(e))
         record(SKIP)
 
-    # 7 ── Kabsch rigid alignment ─────────────────────────────────────────────
+    # 7 ── Kabsch rigid alignment
     label = "Rigid alignment (Kabsch)"
     try:
         ok = _check_kabsch(ref, conv)
         if not ok:
             _result_line(
-                label, SKIP, "not rigidly aligned (reordering / PBC wrap); see test 6"
+                label,
+                SKIP,
+                "not rigidly aligned; reordering/PBC wrapping likely; see fractional test",
             )
             record(SKIP)
         else:
@@ -608,7 +694,6 @@ def run_equivalence_tests(
         _result_line(label, SKIP, str(e))
         record(SKIP)
 
-    # ── Summary ──────────────────────────────────────────────────────────────
     total = n_pass + n_fail + n_skip
     summary_badge = green("ALL PASSED") if n_fail == 0 else red("FAILURES DETECTED")
     print(
@@ -637,21 +722,21 @@ def main() -> None:
         "input",
         type=str,
         nargs="+",
-        help="Input file path(s) or glob pattern (e.g. '*.xyz')",
+        help="Input file path(s) or glob pattern, e.g. '*.xyz'",
     )
     parser.add_argument(
         "-o",
         "--output",
         type=str,
         default=None,
-        help="Output file path (single-file conversion only).",
+        help="Output file path, single-file conversion only.",
     )
     parser.add_argument(
         "-it",
         "--input-type",
         type=str,
         default=None,
-        help="Force input format (ASE format string). Auto-detected if omitted.",
+        help="Force input format, ASE format string. Auto-detection is not enabled here.",
     )
     parser.add_argument(
         "-ot",
@@ -666,7 +751,17 @@ def main() -> None:
         type=int,
         nargs=3,
         metavar=("nx", "ny", "nz"),
-        help="Build a supercell (e.g. -r 2 2 2).",
+        help="Build a supercell, e.g. -r 2 2 2.",
+    )
+    parser.add_argument(
+        "--frac",
+        action="store_true",
+        help=(
+            "Write fractional/scaled coordinates when supported. "
+            "For alm.lmp/lammpstrj writes xs ys zs instead of xu yu zu. "
+            "For VASP-like formats uses direct coordinates. "
+            "Not allowed for lammps-data."
+        ),
     )
     parser.add_argument(
         "--skip-tests",
@@ -685,7 +780,7 @@ def main() -> None:
         print_available_formats()
         sys.exit(0)
 
-    # ── Expand globs ─────────────────────────────────────────────────────────
+    # Expand globs
     input_files = []
     for pattern in args.input:
         matches = glob(pattern)
@@ -697,16 +792,12 @@ def main() -> None:
         print(f"  {red('Error:')} No input files found.")
         sys.exit(1)
 
-    # ── Build (infile, outfile) pairs ────────────────────────────────────────
+    # Build infile/outfile pairs
     if len(input_files) == 1 and args.output:
         pairs = [(input_files[0], args.output)]
-
     elif len(input_files) > 1 and args.output:
-        print(
-            f"  {red('Error:')} -o/--output can only be used with a single input file."
-        )
+        print(f"  {red('Error:')} -o/--output can only be used with one input file.")
         sys.exit(1)
-
     else:
         if not args.output_type:
             print(
@@ -715,43 +806,56 @@ def main() -> None:
             sys.exit(1)
         pairs = [(f, derive_output(f, args.output_type)) for f in input_files]
 
-    # ── Process each pair ────────────────────────────────────────────────────
     any_test_failed = False
 
     for infile, outfile in pairs:
-        infile_type = args.input_type  # or guess_format(infile)
-        outfile_type = args.output_type  # or guess_format(outfile)
+        infile_type = args.input_type
+        outfile_type = args.output_type
 
-        if infile_type not in ioformats and infile_type not in ("alm.xyz", "lammpstrj"):
+        if infile_type is None:
             print(
-                f"  {red('Error:')} Unrecognized input format '{infile_type}' for '{infile}'."
+                f"  {red('Error:')} --input-type/-it is required in this version "
+                f"for '{infile}'."
+            )
+            sys.exit(1)
+
+        if outfile_type is None:
+            print(
+                f"  {red('Error:')} --output-type/-ot is required in this version "
+                f"for '{outfile}'."
+            )
+            sys.exit(1)
+
+        valid_input_custom = ("alm.xyz", "alm.lmp", "lammpstrj")
+        valid_output_custom = ("alm.lmp", "lammpstrj")
+
+        if infile_type not in ioformats and infile_type not in valid_input_custom:
+            print(
+                f"  {red('Error:')} Unrecognized input format '{infile_type}' "
+                f"for '{infile}'."
             )
             print_available_formats()
             sys.exit(1)
 
-        if outfile_type not in ioformats and outfile_type not in (
-            "alm.lmp",
-            "lammpstrj",
-        ):
+        if outfile_type not in ioformats and outfile_type not in valid_output_custom:
             print(
-                f"  {red('Error:')} Unrecognized output format '{outfile_type}' for '{outfile}'."
+                f"  {red('Error:')} Unrecognized output format '{outfile_type}' "
+                f"for '{outfile}'."
             )
             print_available_formats()
             sys.exit(1)
 
         print(bold(f"\n  {cyan('→')} {infile}  →  {outfile}"))
         print(f"     format:  {infile_type}  →  {outfile_type}")
+
         if args.replicate:
             print(f"     supercell: {'×'.join(str(n) for n in args.replicate)}")
 
-        # Re-read the original *before* conversion so tests can compare
+        if args.frac:
+            print("     coordinates: fractional/scaled output requested")
+
         try:
-            if infile_type in ("lammpstrj", "alm.lmp"):
-                orig_atoms = _read_lammps_dump(infile)
-            elif infile_type in ("alm.xyz"):
-                orig_atoms = _read_xyz_alamode(infile)
-            else:
-                orig_atoms = read(infile, format=infile_type)
+            orig_atoms = _read_input_atoms(infile, infile_type)
         except Exception as e:
             print(f"  {red('Error reading input:')} {e}")
             sys.exit(1)
@@ -763,18 +867,18 @@ def main() -> None:
                 infile_type,
                 outfile_type,
                 replicate=args.replicate,
+                fractional=args.frac,
             )
             print(f"     {green('Done.')}")
         except Exception as e:
             print(f"  {red('Conversion error:')} {e}")
             sys.exit(1)
 
-        # ── Tests ────────────────────────────────────────────────────────────
         if not args.skip_tests:
             try:
                 ok = run_equivalence_tests(
                     orig_atoms,
-                    None,  # conv=None → re-read from disk inside
+                    None,
                     infile,
                     outfile,
                     outfile_type,
