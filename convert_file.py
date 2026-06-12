@@ -440,6 +440,27 @@ def convert(
     return ase_cell
 
 
+def print_poscar_stdout(atoms: Atoms) -> None:
+    """Print POSCAR-style cell vectors and scaled positions to stdout."""
+    cell = atoms.cell.array.copy()
+    scaled = atoms.get_scaled_positions(wrap=False)
+    atom_types = atoms.arrays.get("type", atoms.get_chemical_symbols())
+    species_ids = {}
+
+    print("1.0")
+    for row in cell:
+        print(f"{row[0]:.16f} {row[1]:.16f} {row[2]:.16f}")
+
+    print("atomic_type species_id x_scaled y_scaled z_scaled")
+    for atom_type, pos in zip(atom_types, scaled):
+        if atom_type not in species_ids:
+            species_ids[atom_type] = len(species_ids) + 1
+        print(
+            f"{atom_type} {species_ids[atom_type]} "
+            f"{pos[0]:.16f} {pos[1]:.16f} {pos[2]:.16f}"
+        )
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # EQUIVALENCE CHECKS
 # ═════════════════════════════════════════════════════════════════════════════
@@ -764,6 +785,14 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--print-scaled",
+        action="store_true",
+        help=(
+            "Print POSCAR-style cell vectors and "
+            "'atomic_type x_scaled y_scaled z_scaled' rows to stdout, then exit."
+        ),
+    )
+    parser.add_argument(
         "--skip-tests",
         action="store_true",
         help="Disable automatic equivalence tests after conversion.",
@@ -791,6 +820,40 @@ def main() -> None:
     if not input_files:
         print(f"  {red('Error:')} No input files found.")
         sys.exit(1)
+
+    if args.print_scaled:
+        if len(input_files) != 1:
+            print(f"  {red('Error:')} --print-scaled requires exactly one input file.")
+            sys.exit(1)
+
+        if args.input_type is None:
+            print(
+                f"  {red('Error:')} --input-type/-it is required in this version "
+                f"for '{input_files[0]}'."
+            )
+            sys.exit(1)
+
+        valid_input_custom = ("alm.xyz", "alm.lmp", "lammpstrj")
+        if args.input_type not in ioformats and args.input_type not in valid_input_custom:
+            print(
+                f"  {red('Error:')} Unrecognized input format '{args.input_type}' "
+                f"for '{input_files[0]}'."
+            )
+            print_available_formats()
+            sys.exit(1)
+
+        try:
+            atoms = _read_input_atoms(input_files[0], args.input_type)
+        except Exception as e:
+            print(f"  {red('Error reading input:')} {e}")
+            sys.exit(1)
+
+        if args.replicate:
+            atoms = atoms.repeat(args.replicate)
+            atoms.wrap(eps=1e-12)
+
+        print_poscar_stdout(atoms)
+        sys.exit(0)
 
     # Build infile/outfile pairs
     if len(input_files) == 1 and args.output:
