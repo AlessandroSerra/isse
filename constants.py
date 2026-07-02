@@ -4,8 +4,8 @@ from numpy import asarray
 from numpy.typing import NDArray
 
 ANGSTROM_TO_BOHR = 1.8897259886
-BOHR_TO_ANGSTROM = 0.529177249
-AMU_A2_FS2_TO_EV = 103.6426965268
+BOHR_TO_ANGSTROM = 0.5291772106
+AMU_A2_FS2_TO_EV = 103.64269653
 
 # Approximate standard atomic weights in unified atomic mass units (u).
 # Values are intended for generic numerical use, not for isotope-resolved
