@@ -10,14 +10,22 @@ from ..constants import symbol_from_mass
 from ..structures import Atoms, Trajectory
 
 DUMP_HEADER_NLINES = 9
+PS_TO_FS = 1e3
+KCAL_MOL_TO_EV = 0.0433641
 
 
 def parse_lammps_dump(
-    filename: str | Path,
-    symbols: Sequence[str] | None = None,
+    filename: str | Path, symbols: Sequence[str] | None = None, units: str = "metal"
 ) -> Trajectory:
     """
     Parse a LAMMPS dump file as a lazy trajectory.
+
+    LAMMPS dump quantities are interpreted using the following units:
+        - time: fs
+        - positions and cell vectors: angstrom
+        - velocities: angstrom / fs
+        - forces: eV / angstrom
+        - masses: atomic mass units
 
     Parameters
     ----------
@@ -36,9 +44,10 @@ def parse_lammps_dump(
     Raises
     ------
     ValueError
-        if the header lines are Incomplete or if no masses are found
-        and no chemical symbol is provided
+        If a frame header is incomplete, if no valid frames are found, or if
+        chemical symbols cannot be inferred from masses or atom types.
     """
+
     filepath = Path(filename)
     offsets: list[int] = []
     first_properties: list[str] | None = None
@@ -46,23 +55,30 @@ def parse_lammps_dump(
     with filepath.open("rb") as f:
         while True:
             offset = f.tell()
-            line = f.readline()
+            first_line = f.readline()
 
-            if not line:
+            if not first_line:
                 break
 
-            if line.startswith(b"ITEM: TIMESTEP"):
-                offsets.append(offset)
+            if not first_line.startswith(b"ITEM: TIMESTEP"):
+                raise ValueError(f"Invalid LAMMPS frame at byte offset {offset}")
 
-                if first_properties is None:
-                    header = [line] + [
-                        f.readline() for _ in range(DUMP_HEADER_NLINES - 1)
-                    ]
+            header = [first_line] + [
+                f.readline() for _ in range(DUMP_HEADER_NLINES - 1)
+            ]
 
-                    if any(not header_line for header_line in header):
-                        raise ValueError("Incomplete first LAMMPS dump frame")
+            if any(not line for line in header):
+                raise ValueError(f"Incomplete LAMMPS header at byte offset {offset}")
 
-                    first_properties = header[8].decode("utf-8").split()[2:]
+            natoms = int(header[3])
+            offsets.append(offset)
+
+            if first_properties is None:
+                first_properties = header[8].decode("utf-8").split()[2:]
+
+            for _ in range(natoms):
+                if not f.readline():
+                    raise ValueError(f"Incomplete LAMMPS frame at byte offset {offset}")
 
     if not offsets:
         raise ValueError("No LAMMPS dump frames found")
@@ -84,10 +100,7 @@ def parse_lammps_dump(
             "Provide symbols in LAMMPS type order"
         )
 
-    frame_reader = partial(
-        _read_frame_lammps_dump,
-        type_symbols=symbols,
-    )
+    frame_reader = partial(_read_frame_lammps_dump, type_symbols=symbols, units=units)
 
     return Trajectory(
         path=filepath,
@@ -140,6 +153,7 @@ def _read_frame_lammps_dump(
     offset: int,
     *,
     type_symbols: Sequence[str] | None = None,
+    units: str = "metal",
 ) -> Atoms:
     """
     Read one frame from a LAMMPS dump file.
@@ -152,12 +166,27 @@ def _read_frame_lammps_dump(
         Byte offset marking the beginning of the frame.
     type_symbols : Sequence[str] or None, optional
         Chemical symbols in LAMMPS atom-type order.
+    units: str or None, optional
+        LAMMPS units of the dump file, default 'metal'
 
     Returns
     -------
     Atoms
         Parsed atomistic configuration.
     """
+
+    if units not in ("real", "metal"):
+        raise ValueError(
+            "Unrecognized unit style, please specify either 'metal' or 'real'"
+        )
+    else:
+        if units == "real":
+            time_factor = 1
+            energy_factor = KCAL_MOL_TO_EV
+        else:
+            time_factor = PS_TO_FS
+            energy_factor = 1
+
     with filepath.open("rb") as file:
         file.seek(offset)
 
@@ -300,11 +329,13 @@ def _read_frame_lammps_dump(
 
         if has_velocities:
             velocities[atom_index] = [
-                float(values[column]) for column in velocity_columns
+                (float(values[column]) * time_factor) for column in velocity_columns
             ]
 
         if has_forces:
-            forces[atom_index] = [float(values[column]) for column in force_columns]
+            forces[atom_index] = [
+                (float(values[column]) * energy_factor) for column in force_columns
+            ]
 
         if has_ids:
             ids[atom_index] = int(values[columns["id"]])
