@@ -1,0 +1,15 @@
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"
+
+[project]
+name = "isse"
+version = "0.0.1"
+description = "Ichnusa Solid State Environment"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "spglib",
+    "numba",
+]
