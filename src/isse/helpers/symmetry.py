@@ -1,6 +1,9 @@
+"""Symmetry operations to find scaled positions, find the primitive cell, ..."""
+
 from __future__ import annotations
 
 import logging
+from collections import deque
 from typing import cast, overload
 
 import numpy as np
@@ -176,9 +179,9 @@ def find_primitive_cell(
 
     if np.isclose(primitive_volume, starting_volume, rtol=1e-8, atol=0.0):
         raise ValueError(
-            "No smaller primitive cell was found."
-            "The input structure may already be primitive"
-            "or may not retain sufficient symmetry"
+            "No smaller primitive cell was found.\n"
+            "The input structure may already be primitive or\n"
+            "may not retain sufficient symmetry."
         )
 
     logger.info(
@@ -191,4 +194,191 @@ def find_primitive_cell(
         cell=primitive_cell,
         positions=primitive_cartesian_positions,
         info=atoms.info.copy(),
+    )
+
+
+def _get_supercell_transofm_matrix(
+    supercell: NDArray[np.float64],
+    primitive_cell: NDArray[np.float64],
+    tolerance: float = 1e-6,
+) -> NDArray[np.int32]:
+    """
+    Determine the integer supercell relating a primitive cell to a supercell.
+
+    The lattice vectors are assumed to be stored by row, according to
+
+    ``supercell = supercell_supercell @ primitive_cell``.
+
+    Parameters
+    ----------
+    supercell : numpy.ndarray
+        Simulation-cell supercell with shape ``(3, 3)``.
+    primitive_cell : numpy.ndarray
+        Primitive-cell supercell with shape ``(3, 3)``.
+    tolerance : float, optional
+        Absolute tolerance used to verify that the transformation supercell is
+        integer-valued. The default is ``1e-6``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Integer supercell supercell with shape ``(3, 3)`` and dtype
+        ``numpy.int32``.
+
+    Raises
+    ------
+    ValueError
+        If either cell has an invalid shape, the primitive cell is singular,
+        or the simulation cell is not an integer supercell of the primitive
+        cell.
+    """
+    supercell = np.asarray(supercell, dtype=np.float64)
+    primitive_cell = np.asarray(primitive_cell, dtype=np.float64)
+
+    if supercell.shape != (3, 3):
+        raise ValueError(f"supercell must have shape (3, 3), found {supercell.shape}")
+
+    if primitive_cell.shape != (3, 3):
+        raise ValueError(
+            f"primitive_cell must have shape (3, 3), found {primitive_cell.shape}"
+        )
+
+    try:
+        transformation = np.linalg.solve(
+            primitive_cell.T,
+            supercell.T,
+        ).T
+    except np.linalg.LinAlgError as error:
+        raise ValueError("primitive_cell is singular") from error
+
+    rounded = np.rint(transformation)
+
+    if not np.allclose(
+        transformation,
+        rounded,
+        rtol=0.0,
+        atol=tolerance,
+    ):
+        raise ValueError(
+            "The simulation cell is not an integer supercell\nof the primitive cell"
+        )
+
+    return np.asarray(rounded, dtype=np.int32)
+
+
+def _generate_qpoints(
+    supercell: NDArray[np.int32],
+) -> NDArray[np.float64]:
+    """
+    Generate q-points commensurate with an integer supercell supercell.
+
+    For lattice vectors stored by row, the commensurate reduced q-points
+    satisfy
+
+    ``supercell_supercell.T @ q = integer_vector``.
+
+    The number of distinct q-points is equal to
+
+    ``abs(det(supercell_supercell))``.
+
+    Parameters
+    ----------
+    supercell_supercell : numpy.ndarray
+        Integer supercell supercell with shape ``(3, 3)``.
+    centered : bool, optional
+        If True, return reduced q-point coordinates in ``[-0.5, 0.5)``.
+        Otherwise, return them in ``[0, 1)``. The default is True.
+    decimals : int, optional
+        Number of decimal places used when identifying equivalent q-points.
+        The default is 12.
+
+    Returns
+    -------
+    numpy.ndarray
+        Commensurate reduced q-point coordinates with shape
+        ``(n_qpoints, 3)``, where
+        ``n_qpoints = abs(det(supercell_supercell))``.
+
+    Raises
+    ------
+    ValueError
+        If the supercell has an invalid shape, is not integer-valued, is
+        singular, or the expected number of q-points cannot be generated.
+    """
+
+    if supercell.shape != (3, 3):
+        raise ValueError(
+            f"supercell_supercell must have shape (3, 3), found {supercell.shape}"
+        )
+
+    rounded = np.rint(supercell)
+
+    if not np.allclose(supercell, rounded, rtol=0.0, atol=0.0):
+        raise ValueError("supercell_supercell must contain integer values")
+
+    supercell = np.asarray(rounded, dtype=np.int32)
+
+    determinant = int(round(np.linalg.det(supercell)))
+    nqpoints = abs(determinant)
+
+    if nqpoints == 0:
+        raise ValueError("supercell_supercell is singular")
+
+    generators = np.linalg.inv(supercell.T)
+
+    zero = np.zeros(3, dtype=np.float64)
+    zero_key: tuple[float, float, float] = (
+        float(zero[0]),
+        float(zero[1]),
+        float(zero[2]),
+    )
+
+    qpoints_by_key: dict[
+        tuple[float, float, float],
+        NDArray[np.float64],
+    ] = {zero_key: zero}
+
+    pending = deque([zero])
+
+    while pending:
+        qpoint = pending.popleft()
+
+        for generator in generators.T:
+            candidate = (qpoint + generator) % 1.0
+            candidate = np.round(candidate, decimals=10)
+            candidate %= 1.0
+
+            key: tuple[float, float, float] = (
+                float(candidate[0]),
+                float(candidate[1]),
+                float(candidate[2]),
+            )
+            if key not in qpoints_by_key:
+                qpoints_by_key[key] = candidate
+                pending.append(candidate)
+
+    if len(qpoints_by_key) != nqpoints:
+        raise ValueError(
+            "Failed to generate the expected number of q-points: "
+            f"found {len(qpoints_by_key)}, expected {nqpoints}"
+        )
+
+    qpoints = np.asarray(
+        list(qpoints_by_key.values()),
+        dtype=np.float64,
+    )
+    qpoints_centered = (qpoints + 0.5) % 1.0 - 0.5
+    qpoints_centered = np.round(qpoints_centered, decimals=10)
+
+    order = np.lexsort(
+        (
+            qpoints_centered[:, 2],
+            qpoints_centered[:, 1],
+            qpoints_centered[:, 0],
+        )
+    )
+
+    return np.ascontiguousarray(
+        qpoints_centered[order],
+        dtype=np.float64,
     )
