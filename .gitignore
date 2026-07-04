@@ -1,5 +1,4 @@
 **/__pycache__/
-isse/tests/
-todo/
-/README.old
-/isse/breakpoint.md
+tests/
+dist/
+archive/
