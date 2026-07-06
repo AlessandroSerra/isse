@@ -326,7 +326,9 @@ def project_velocities(
     evec_filepath: str | Path,
     batch_size: int = 100,
     parseval_tolerance: float = 1e-6,
-) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+) -> tuple[
+    NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]
+]:
     """
     Project trajectory velocities onto the phonon eigenmodes.
 
@@ -350,6 +352,8 @@ def project_velocities(
 
     Returns
     -------
+    qpoints : numpy.ndarray
+        Reduced q-point coordinates, with shape ``(nqpoints, 3)``.
     qdot2 : numpy.ndarray
         Squared moduli of the projected modal velocities, with shape
         ``(nframes, nqpoints, nmodes)``.
@@ -364,8 +368,8 @@ def project_velocities(
     FileNotFoundError
         If the ALAMODE eigenvector file does not exist.
     ValueError
-        If the reference structure does not contain atomic masses or if
-        ``batch_size`` is not positive.
+        If the reference structure does not contain atomic masses, if
+        ``batch_size`` is not positive or if the trajectory contains no frames.
     """
     evec_filepath = Path(evec_filepath)
 
@@ -434,15 +438,13 @@ def project_velocities(
         parseval_error_batches.append(errors_batch)
 
     if not qdot2_batches:
-        nqpoints, nmodes = coefficients.shape[:2]
-
-        return (
-            np.empty((0, nqpoints, nmodes), dtype=np.float64),
-            np.empty(0, dtype=np.float64),
-            np.empty(0, dtype=np.float64),
+        raise ValueError(
+            "No trajectory frames were read. "
+            "The trajectory is empty or the parser did not yield any frames."
         )
 
     return (
+        alamode_qpoints,
         np.concatenate(qdot2_batches, axis=0),
         np.concatenate(atomic_norm_batches, axis=0),
         np.concatenate(parseval_error_batches, axis=0),
