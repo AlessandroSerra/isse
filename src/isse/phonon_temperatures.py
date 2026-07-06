@@ -51,6 +51,8 @@ def calculate_temperature(
     -------
     dict
         Dictionary with the following keys:
+        - ``"qpoints"``: used qpoints, shape
+          ``(nqpoints, 3)``.
         - ``"mode_temperatures"``: modal kinetic temperatures, shape
           ``(nqpoints, nmodes)``.
         - ``"mean_thermal_mode_temperature"``: modal temperature averaged
@@ -62,7 +64,7 @@ def calculate_temperature(
           ``(nframes, nselected, nmodes)``. Present only if
           ``selected_iqs`` is not ``None``.
     """
-    qdot2, _, parseval_errors = project_velocities(
+    qpoints, qdot2, _, parseval_errors = project_velocities(
         trajectory,
         reference_atoms,
         evec_filepath,
@@ -72,23 +74,21 @@ def calculate_temperature(
 
     natoms = len(reference_atoms)
 
-    # Temperatura media di ogni modo (media temporale + equipartizione).
     mean_qdot2 = qdot2.mean(axis=0)
     mode_temperatures = mean_qdot2 * AMU_A2_FS2_TO_EV / KB_EV_K
 
-    # Punto Gamma ed esclusione dei 3 modi acustici (traslazioni rigide).
     gamma_index = 0
     thermal_mask = np.ones_like(mode_temperatures, dtype=bool)
     thermal_mask[gamma_index, :3] = False
     mean_thermal_mode_temperature = float(mode_temperatures[thermal_mask].mean())
 
-    # Temperatura globale ricostruita dall'energia vibrazionale totale.
     ndof = 3 * natoms - 3
     reconstructed_temperature = float(
         mean_qdot2.sum() * AMU_A2_FS2_TO_EV / (ndof * KB_EV_K)
     )
 
     results: dict[str, NDArray[np.float64] | float] = {
+        "qpoints": qpoints,
         "mode_temperatures": mode_temperatures,
         "mean_thermal_mode_temperature": mean_thermal_mode_temperature,
         "reconstructed_temperature": reconstructed_temperature,
