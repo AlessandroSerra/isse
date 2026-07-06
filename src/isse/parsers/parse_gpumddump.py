@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import shlex as shx
-import warnings
+from logging import getLogger
 from pathlib import Path
 
 import numpy as np
 
 from ..structures import Atoms, Trajectory
+
+logger = getLogger(__name__)
 
 DUMP_HEADER_NLINES = 2
 
@@ -81,10 +83,11 @@ def parse_gpumd_dump(filename: str | Path) -> Trajectory:
         raise ValueError("No valid frames found in GPUMD dump")
 
     if first_header is not None and b"Time" not in first_header:
-        warnings.warn(
+        logger.warning(
             "No Time property found, timestep information will not be available",
-            stacklevel=2,
         )
+
+    logger.info(f"Succesfully loaded {len(offsets)} frames from {filepath}")
 
     return Trajectory(
         path=filepath,
