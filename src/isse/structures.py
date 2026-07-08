@@ -83,7 +83,7 @@ class Atoms:
             n_atoms,
             3,
         ):
-            raise ValueError("unwrapped_positions must have shape (n_atoms,)")
+            raise ValueError("unwrapped_positions must have shape (n_atoms, 3)")
 
         if self.masses is not None and self.masses.shape != (n_atoms,):
             raise ValueError("masses must have shape (n_atoms,)")
