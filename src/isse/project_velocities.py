@@ -379,10 +379,16 @@ def project_velocities(
     if not evec_filepath.is_file():
         raise FileNotFoundError(f"ALAMODE eigenvector file not found: {evec_filepath}")
 
-    masses = reference_atoms.masses
-
-    if masses is None:
-        raise ValueError("The reference Atoms object must contain atomic masses.")
+    if reference_atoms.masses is not None:
+        masses = reference_atoms.masses
+    elif trajectory[0].masses is not None:
+        logger.warning(
+            "No masses found in reference atoms. Using masses from trajectory."
+        )
+    else:
+        raise ValueError(
+            "The Trajectory or the reference Atoms object must contain atomic masses."
+        )
 
     masses = np.asarray(masses, dtype=np.float64)
     (
@@ -394,6 +400,10 @@ def project_velocities(
 
     mapping_results, mapping_residuals = map_atoms_to_primitive(reference_atoms)
     cell_indices, basis_indices = mapping_results
+
+    logger.info(
+        f"Successfully mapped atoms to primitive cell with {np.max(mapping_residuals):.2e} A max residual."
+    )
 
     coefficients = _precompute_coefficients(
         alamode_qpoints,
