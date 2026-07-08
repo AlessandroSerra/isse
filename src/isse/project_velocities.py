@@ -15,7 +15,7 @@ except ImportError:
     NUMBA_AVAILABLE = False
 
 from .helpers.cell_mapping import map_atoms_to_primitive
-from .parsers.parse_alamode import read_alamode_evec
+from .io.parse_alamode import read_alamode_evec
 from .structures import Atoms, Trajectory
 
 logger = getLogger(__name__)
