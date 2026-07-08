@@ -19,11 +19,12 @@
 ## 2. Stato rapido della repo
 
 - `README.md` è minimale.
-- `src/isse/__init__.py`, `src/isse/helpers/__init__.py`, `src/isse/parsers/__init__.py` sono vuoti: non espongono ancora API pubbliche aggregate.
-- `src/isse/convert_file.py` contiene solo `from __future__ import annotations`.
-- `src/isse/convert_file.bak.py` è un file legacy/untracked con una CLI/converter più esteso; non sembra integrato nel package attuale.
-- Non sono presenti test versionati; `.gitignore` ignora `tests/` e `src/isse/TODO.md`.
-- Nota working tree al momento dell'analisi: `src/isse/convert_file.py` modificato e `src/isse/convert_file.bak.py` non tracciato.
+- `src/isse/__init__.py`, `src/isse/helpers/__init__.py`, `src/isse/io/__init__.py` sono vuoti: non espongono ancora API pubbliche aggregate.
+- `src/isse/convert_file.py` è ora una CLI/converter basata su **ASE** con test di equivalenza integrati; `ase` e `scipy` non sono però nelle dipendenze runtime di `pyproject.toml`.
+- `src/isse/convert.py` è un converter nuovo/non tracciato che reimplementa la conversione senza ASE, usando `Atoms`, `Trajectory` e i moduli I/O e writer ISSE per i formati supportati internamente.
+- `src/isse/radial_distribution.py` e `src/isse/helpers/periodic.py` aggiungono calcolo RDF e utility PBC/minimum-image.
+- Sono presenti file in `tests/`, ma `.gitignore` ignora `tests/`: quindi non sono versionati. `.gitignore` ignora anche `dist/`, `archive/` e `src/isse/TODO.md`.
+- Nota working tree dopo questo aggiornamento: `AGENTS.md`, `src/isse/phonon_temperatures.py` e `src/isse/project_velocities.py` modificati; `src/isse/parsers/` risulta rimosso e `src/isse/io/` aggiunto; `src/isse/convert.py` non tracciato (`git status --short`).
 
 ## 3. Albero logico
 
@@ -33,16 +34,21 @@ src/isse/
 ├── structures.py             # Atoms e Trajectory lazy
 ├── phonon_temperatures.py    # entry point alto livello per temperature modali
 ├── project_velocities.py     # proiezione velocità su modi fononici
-├── convert_file.py           # placeholder attuale
-├── convert_file.bak.py       # legacy converter/CLI non integrato
+├── convert_file.py           # CLI/converter ASE con test di equivalenza
+├── convert.py                # converter ISSE-native senza ASE, non tracciato
+├── radial_distribution.py    # RDF totale su Trajectory lazy
 ├── helpers/
 │   ├── cell_mapping.py       # mapping atomi supercella -> cella primitiva + basis
+│   ├── periodic.py           # wrap/unwrap e minimum-image in PBC
 │   └── symmetry.py           # scaled positions, primitive cell via spglib, qpoint helpers
-└── parsers/
+└── io/
     ├── parse_alamode.py      # lettura file ALAMODE .evec
     ├── parse_gpumddump.py    # parser lazy GPUMD dump
     ├── parse_lammps.py       # parser LAMMPS data/dump
-    └── parse_vasp.py         # parser POSCAR
+    ├── parse_vasp.py         # parser POSCAR
+    ├── write_gpumddump.py    # writer GPUMD/extended XYZ
+    ├── write_lammps.py       # writer LAMMPS data/dump
+    └── write_vasp.py         # writer POSCAR
 ```
 
 ## 4. Modello dati centrale
@@ -73,7 +79,7 @@ Caratteristiche:
 
 ## 5. Flussi principali
 
-### 5.1 Parser -> dati atomistici
+### 5.1 I/O -> dati atomistici
 
 ```text
 file esterno
@@ -119,12 +125,13 @@ calculate_temperature(...)
        AMU_A2_FS2_TO_EV / KB_EV_K
 ```
 
-Output dict atteso:
+Output dict attuale:
 - `qpoints`, shape `(nqpoints, 3)`
 - `mode_temperatures`, shape `(nqpoints, nmodes)`
-- `mean_thermal_mode_temperature`
-- `reconstructed_temperature`
+- `mean_mode_temperature`
 - opzionale `selected_mode_temperatures`, shape `(nframes, nselected, nmodes)`
+
+Nota: `reconstructed_temperature` viene calcolata e loggata, ma non inserita in `results`; la docstring è stata aggiornata per riflettere l'output effettivo.
 
 ## 6. Moduli e responsabilità
 
@@ -139,7 +146,7 @@ Contiene:
   - `symbol_from_mass(mass, tolerance=1e-3)`
   - `symbols_from_masses(masses, tolerance=1e-3)`
 
-### `parsers/parse_lammps.py`
+### `io/parse_lammps.py`
 
 API:
 - `parse_lammps(filename, format="dump"|"data", symbols=None, units=None)` dispatcher
@@ -152,7 +159,7 @@ Note:
 - Dump: supporta posizioni `x/y/z`, scaled `xs/ys/zs`, unwrapped `xu/yu/zu`, velocità, forze, masse, `id`, `type`.
 - Box ortogonali e triclinici convertiti in cella 3x3 con vettori per riga.
 
-### `parsers/parse_gpumddump.py`
+### `io/parse_gpumddump.py`
 
 API:
 - `parse_gpumd_dump(filename) -> Trajectory`
@@ -162,7 +169,7 @@ Note:
 - Richiede header con `Lattice` e `Properties`.
 - Legge proprietà tipo extended XYZ: `species`, `pos`, opzionali `vel`, `force`, `unwrapped_position`, `mass`, `group`, `Time`.
 
-### `parsers/parse_vasp.py`
+### `io/parse_vasp.py`
 
 API:
 - `parse_poscar(filename) -> Atoms`
@@ -173,7 +180,7 @@ Note:
 - Calcola masse dai simboli tramite `mass_from_symbol`.
 - Ignora/gestisce parzialmente Selective dynamics.
 
-### `parsers/parse_alamode.py`
+### `io/parse_alamode.py`
 
 API:
 - `read_alamode_evec(filename) -> (primitive_cell, qpoints, eigenvalues, eigenvectors)`
@@ -182,6 +189,37 @@ Note:
 - Legge file ALAMODE `.evec`.
 - Converte i vettori di reticolo da Bohr ad Å.
 - `eigenvectors` shape `(nq, nmodes, nat_primitive, 3)` complessa.
+
+### `io/write_lammps.py`
+
+API:
+- `write_lammps_data(filename, atoms, units="metal") -> None`
+- `write_lammps_dump(filename, trajectory, units="metal", fractional=False) -> None` con `trajectory` = `Atoms | Trajectory | list[Atoms]`
+
+Note:
+- Scrive LAMMPS data `atom_style atomic` single-frame.
+- Scrive LAMMPS dump multi-frame da iterabile di `Atoms`.
+- Converte velocità/forze da unità interne verso `metal` o `real`.
+- Richiede celle in forma restricted-triclinic.
+
+### `io/write_gpumddump.py`
+
+API:
+- `write_gpumd_dump(filename, trajectory) -> None` con `trajectory` = `Atoms | Trajectory | list[Atoms]`
+
+Note:
+- Scrive formato GPUMD/extended XYZ multi-frame.
+- Include proprietà opzionali se presenti: `vel`, `force`, `unwrapped_position`, `mass`, `group`, `Time`.
+
+### `io/write_vasp.py`
+
+API:
+- `write_poscar(filename, atoms, direct=True) -> None`
+
+Note:
+- Scrive POSCAR single-frame.
+- Raggruppa le righe di posizione per specie in accordo con le righe specie/conteggi.
+- Supporta coordinate Direct o Cartesian.
 
 ### `helpers/symmetry.py`
 
@@ -233,6 +271,85 @@ Responsabilità:
 - Calcola temperature modali e temperatura ricostruita.
 - Esclude i primi 3 modi a Gamma dalla media termica (`thermal_mask[0, :3] = False`).
 
+Note attuali:
+- Calcola `reconstructed_temperature`, ma non la restituisce.
+- Restituisce `mean_mode_temperature`; la docstring è allineata all'output effettivo.
+
+### `radial_distribution.py`
+
+API:
+- `calculate_rdf(trajectory, r_max, dr, batch_size=100, use_numba=True) -> dict[str, NDArray[np.float64]]`
+
+Responsabilità:
+- Calcola la radial distribution function totale `g(r)` su una `Trajectory` lazy.
+- Processa posizioni/celle a batch.
+- Usa backend Numba se disponibile, altrimenti fallback NumPy.
+
+Contratti/assunzioni:
+- Ogni frame deve avere posizioni shape `(natoms, 3)` e cella `(3, 3)`.
+- Tutti i frame devono avere lo stesso numero di atomi.
+- Output: `r`, `g_r`, `counts`.
+- Normalizzazione con volume medio della traiettoria.
+
+Dipendenze interne:
+- usa `helpers.periodic.minimum_image_distances` nel fallback NumPy.
+
+### `helpers/periodic.py`
+
+API/helper:
+- `minimum_image_displacements(displacements, cell)`
+- `minimum_image_distances(displacements, cell)`
+- `wrap_positions(positions, cell)`
+- `unwrap_positions(positions, cells)`
+
+Responsabilità:
+- Utility PBC con celle a vettori per riga (`cartesian = fractional @ cell`).
+- Minimum-image, wrap di posizioni cartesiane, unwrap di una traiettoria.
+
+Contratti/assunzioni:
+- Celle shape `(3, 3)`; per `unwrap_positions`, celle fisse `(3, 3)` o per-frame `(n_frames, 3, 3)`.
+- Minimum-image veloce via coordinate frazionarie arrotondate; può non trovare l'immagine cartesiana più vicina per celle fortemente skewed/non ridotte.
+
+### `convert_file.py`
+
+API/CLI:
+- `convert(infile, outfile, infile_type, outfile_type, replicate=None, fractional=False) -> ase.Atoms`
+- `main()` entry point script
+
+Responsabilità:
+- Converter legacy tramite ASE.
+- Supporta input/output custom `alm.lmp`, `lammpstrj`; input custom `alm.xyz`.
+- Supporta supercelle (`--replicate`), coordinate frazionarie (`--frac`), stampa POSCAR-style di coordinate scalate (`--print-scaled`).
+- Esegue test di equivalenza opzionali: conteggio atomi, composizione, parametri reticolari, Minkowski, spglib, coordinate frazionarie via KDTree/scipy, Kabsch.
+
+Punti aperti:
+- Dipende da `ase` e opzionalmente da `scipy`, ma questi pacchetti non sono dichiarati in `pyproject.toml`.
+- È script-style dentro il package e non risulta esposto come console script.
+
+### `convert.py`
+
+API:
+- `convert(infile, outfile, infile_type, outfile_type, input_units=None, output_units=None, symbols=None, replicate=None, fractional=False, frame=None) -> Atoms | Trajectory`
+- `read_file(filename, file_type, units=None, symbols=None) -> Atoms | Trajectory`
+- `write_file(filename, atoms_or_trajectory, file_type, units=None, fractional=False) -> None`
+
+Dipendenze interne:
+- legge tramite `io/parse_*.py`.
+- scrive delegando a `io/write_vasp.py`, `io/write_lammps.py`, `io/write_gpumddump.py`.
+- i writer di traiettoria accettano un parametro `trajectory`, supportano anche un singolo `Atoms`, e hanno docstring in stile NumPy.
+
+Responsabilità:
+- Conversione ISSE-native senza ASE, usando `Atoms`/`Trajectory` e i moduli I/O interni.
+- Formati supportati: `poscar`/`vasp`, `lammps-data`, `lammps-dump`/`lammpstrj`, `gpumd-dump`/`extxyz`.
+- Supporta traiettorie lazy, selezione frame, supercelle, coordinate frazionarie dove sensato e unità LAMMPS input/output (`metal`/`real`).
+- Include test di equivalenza leggeri e dependency-free: numero frame, numero atomi, composizione, cella, posizioni frazionarie in stesso ordine.
+
+Contratti/assunzioni:
+- LAMMPS output usa celle in forma restricted-triclinic compatibile con i parser ISSE.
+- Le unità LAMMPS non hanno default: l'utente deve specificare esplicitamente `input_units`/`output_units` o `units` per evitare assunzioni silenziose.
+- `lammps-data`, POSCAR/VASP sono output single-frame; per input trajectory multi-frame serve `--frame`.
+- Per LAMMPS data, i simboli chimici sono recuperabili in lettura solo passando `symbols`; i test tentano di derivarli dai simboli originali.
+
 ## 7. Punti di attenzione / debito tecnico
 
 Questa sezione va aggiornata man mano che il codice evolve.
@@ -242,17 +359,19 @@ Questa sezione va aggiornata man mano che il codice evolve.
    - TODO dice anche che `calculate_temperature` dovrebbe restituire i qpoints, ma il codice attuale li include già in `results["qpoints"]`.
 2. **API package non esposta**: gli `__init__.py` sono vuoti; un utente deve importare dai moduli profondi.
 3. **Assenza test**: nessuna suite test versionata. Priorità alta per parser, unità, shape, lazy loading, Parseval.
-4. **`convert_file.bak.py`**: contiene codice legacy importante ma non integrato. Decidere se:
-   - eliminarlo,
-   - migrarlo in moduli moderni,
-   - oppure trasformarlo in CLI ufficiale.
-5. **Typo in `symmetry.py`**: `_get_supercell_transofm_matrix` dovrebbe probabilmente essere `_get_supercell_transform_matrix`.
-6. **`parse_vasp.py` Selective dynamics**: la gestione è fragile; dopo una riga `Selective dynamics`, legge il tipo coordinate successivo, ma il ramo `elif coords_type.startswith("s")` resta nel codice e può lasciare `positions` non definito in casi anomali.
-7. **`find_primitive_cell`**: se l'input è già primitivo solleva errore. Verificare se questo è desiderato per i workflow di mapping.
-8. **Logging**:
+4. **`convert_file.py` / dipendenze CLI**: il converter è stato migrato nel file principale, ma usa `ase` e `scipy` non dichiarati. Decidere se:
+   - aggiungerli a dipendenze/extra opzionali,
+   - spostare la CLI in un extra/tool separato,
+   - esporre un console script ufficiale.
+5. **`convert.py` non tracciato**: implementato come converter ISSE-native, ma resta da tracciare/versionare e decidere se esporlo come console script ufficiale.
+6. **Typo in `symmetry.py`**: `_get_supercell_transofm_matrix` dovrebbe probabilmente essere `_get_supercell_transform_matrix`.
+7. **`parse_vasp.py` Selective dynamics**: la gestione è fragile; dopo una riga `Selective dynamics`, legge il tipo coordinate successivo, ma il ramo `elif coords_type.startswith("s")` resta nel codice e può lasciare `positions` non definito in casi anomali.
+8. **`find_primitive_cell`**: se l'input è già primitivo solleva errore. Verificare se questo è desiderato per i workflow di mapping.
+9. **Temperature API**: `calculate_temperature` calcola e logga `reconstructed_temperature`, ma non la restituisce; valutare se aggiungerla al dizionario risultati.
+10. **Logging**:
    - typo in messaggi tipo `Succesfully`.
    - in `phonon_temperatures.py` il messaggio `logger.info` sembra mancare una parentesi `)` nel testo formattato.
-9. **Type hints**:
+11. **Type hints**:
    - `parseval_tolerance` documentato come opzionale/`None`, ma annotato `float`.
    - alcuni return/import usano `np.ndarray` generico invece di `NDArray[...]`.
 
@@ -280,11 +399,11 @@ Punti aperti:
 ```
 
 Per nuovi workflow, aggiungi un diagramma breve in **Flussi principali**.
-Per nuovi parser, specifica sempre:
-- formato input
-- unità lette
-- conversioni a unità interne
-- se ritorna `Atoms` o `Trajectory`
+Per nuovi moduli I/O, specifica sempre:
+- formato input/output
+- unità lette/scritte
+- conversioni a unità interne o da unità interne
+- se legge/scrive `Atoms` o `Trajectory`
 - colonne/sezioni supportate
 
 ## 9. Checklist rapida per un agente che riprende il lavoro
@@ -295,8 +414,12 @@ Per nuovi parser, specifica sempre:
    - `src/isse/project_velocities.py`
    - `src/isse/phonon_temperatures.py`
    - `src/isse/helpers/cell_mapping.py`
-4. Se si lavora su I/O, partire da:
-   - `src/isse/parsers/parse_lammps.py`
-   - `src/isse/parsers/parse_gpumddump.py`
-   - `src/isse/parsers/parse_vasp.py`
-5. Prima di refactor importanti, introdurre test minimi su `Atoms`, `Trajectory`, parser e shape degli array.
+4. Se si lavora su RDF/PBC, partire da:
+   - `src/isse/radial_distribution.py`
+   - `src/isse/helpers/periodic.py`
+5. Se si lavora su I/O, partire da:
+   - `src/isse/io/parse_lammps.py`
+   - `src/isse/io/parse_gpumddump.py`
+   - `src/isse/io/parse_vasp.py`
+   - `src/isse/convert.py`
+6. Prima di refactor importanti, introdurre test minimi su `Atoms`, `Trajectory`, parser, shape degli array, RDF/PBC e output di `calculate_temperature`.
