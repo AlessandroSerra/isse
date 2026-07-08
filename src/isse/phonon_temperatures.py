@@ -45,7 +45,7 @@ def calculate_temperature(
     parseval_tolerance : float, optional
         If provided, raise a ``RuntimeError`` as soon as any frame's
         relative Parseval error exceeds this value. The default is
-        ``None`` (no check enforced).
+        ``1e-6``. Pass ``None`` to disable this check.
 
     Returns
     -------
@@ -55,14 +55,15 @@ def calculate_temperature(
           ``(nqpoints, 3)``.
         - ``"mode_temperatures"``: modal kinetic temperatures, shape
           ``(nqpoints, nmodes)``.
-        - ``"mean_thermal_mode_temperature"``: modal temperature averaged
-          over all modes except the acoustic modes at Gamma.
-        - ``"reconstructed_temperature"``: temperature reconstructed from
-          the total vibrational kinetic energy.
+        - ``"mean_mode_temperature"``: modal temperature averaged over all
+          modes except the acoustic modes at Gamma.
         - ``"selected_mode_temperatures"``: instantaneous modal
           temperature time series at ``selected_iqs``, shape
           ``(nframes, nselected, nmodes)``. Present only if
           ``selected_iqs`` is not ``None``.
+
+        ``reconstructed_temperature`` is computed internally and logged, but
+        is not currently included in the returned dictionary.
     """
     qpoints, qdot2, _, parseval_errors = project_velocities(
         trajectory,
