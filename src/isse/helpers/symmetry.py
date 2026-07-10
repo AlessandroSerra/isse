@@ -197,7 +197,7 @@ def find_primitive_cell(
     )
 
 
-def _get_supercell_transofm_matrix(
+def _get_supercell_transform_matrix(
     supercell: NDArray[np.float64],
     primitive_cell: NDArray[np.float64],
     tolerance: float = 1e-6,
