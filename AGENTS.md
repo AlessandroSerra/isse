@@ -19,7 +19,7 @@
 ## 2. Stato rapido della repo
 
 - `README.md` è minimale.
-- `src/isse/__init__.py`, `src/isse/helpers/__init__.py`, `src/isse/io/__init__.py` sono vuoti: non espongono ancora API pubbliche aggregate.
+- `src/isse/__init__.py`, `src/isse/helpers/__init__.py`, `src/isse/io/__init__.py` espongono API pubbliche aggregate: workflow/costanti dal top-level, parser/writer da `isse.io`, helper stabili da `isse.helpers`.
 - `src/isse/convert_file.py` è ora una CLI/converter basata su **ASE** con test di equivalenza integrati; `ase` e `scipy` non sono però nelle dipendenze runtime di `pyproject.toml`.
 - `src/isse/convert.py` è un converter nuovo/non tracciato che reimplementa la conversione senza ASE, usando `Atoms`, `Trajectory` e i moduli I/O e writer ISSE per i formati supportati internamente.
 - `src/isse/radial_distribution.py` e `src/isse/helpers/periodic.py` aggiungono calcolo RDF e utility PBC/minimum-image.
@@ -226,7 +226,7 @@ Note:
 API/helper:
 - `get_scaled_positions(atoms)` oppure `get_scaled_positions(positions, cell)`
 - `find_primitive_cell(atoms, tolerance=1e-5) -> Atoms` usando `spglib`
-- `_get_supercell_transofm_matrix(supercell, primitive_cell, tolerance=1e-6)` *(privata; typo nel nome: `transofm`)*
+- `_get_supercell_transform_matrix(supercell, primitive_cell, tolerance=1e-6)` *(privata)*
 - `_generate_qpoints(supercell)` *(privata)*
 
 Note:
@@ -278,17 +278,18 @@ Note attuali:
 ### `radial_distribution.py`
 
 API:
-- `calculate_rdf(trajectory, r_max, dr, batch_size=100, use_numba=True) -> dict[str, NDArray[np.float64]]`
+- `calculate_rdf(trajectory, r_max, n_bins, batch_size=100, partial=False, species_pairs=None) -> dict[str, NDArray[np.float64] | dict[tuple[str, str], NDArray[np.float64]]]` con `trajectory` = `Trajectory | Atoms`
 
 Responsabilità:
-- Calcola la radial distribution function totale `g(r)` su una `Trajectory` lazy.
+- Calcola la radial distribution function totale `g(r)` su una `Trajectory` lazy o su un singolo `Atoms`.
+- Opzionalmente calcola RDF parziali per tutte le coppie di specie o per `species_pairs`.
 - Processa posizioni/celle a batch.
 - Usa backend Numba se disponibile, altrimenti fallback NumPy.
 
 Contratti/assunzioni:
 - Ogni frame deve avere posizioni shape `(natoms, 3)` e cella `(3, 3)`.
-- Tutti i frame devono avere lo stesso numero di atomi.
-- Output: `r`, `g_r`, `counts`.
+- Tutti i frame devono avere lo stesso numero di atomi e la stessa sequenza di simboli.
+- Output base: `r`, `g_r`, `counts`; con RDF parziali anche `partial_g_r`, `partial_counts` indicizzati da tuple di specie canoniche, es. `("O", "Si")`.
 - Normalizzazione con volume medio della traiettoria.
 
 Dipendenze interne:
@@ -357,21 +358,20 @@ Questa sezione va aggiornata man mano che il codice evolve.
 1. **TODO esistente** (`src/isse/TODO.md`):
    - in `calculate_temperature`, se `reference_atoms` non ha masse, oggi viene sollevata eccezione; desiderato: prenderle dalla trajectory.
    - TODO dice anche che `calculate_temperature` dovrebbe restituire i qpoints, ma il codice attuale li include già in `results["qpoints"]`.
-2. **API package non esposta**: gli `__init__.py` sono vuoti; un utente deve importare dai moduli profondi.
+2. **API package parzialmente esposta**: gli `__init__.py` espongono funzioni/workflow principali, parser/writer e helper stabili; `Atoms` e `Trajectory` restano importabili da `isse.structures` per uso avanzato/test.
 3. **Assenza test**: nessuna suite test versionata. Priorità alta per parser, unità, shape, lazy loading, Parseval.
 4. **`convert_file.py` / dipendenze CLI**: il converter è stato migrato nel file principale, ma usa `ase` e `scipy` non dichiarati. Decidere se:
    - aggiungerli a dipendenze/extra opzionali,
    - spostare la CLI in un extra/tool separato,
    - esporre un console script ufficiale.
 5. **`convert.py` non tracciato**: implementato come converter ISSE-native, ma resta da tracciare/versionare e decidere se esporlo come console script ufficiale.
-6. **Typo in `symmetry.py`**: `_get_supercell_transofm_matrix` dovrebbe probabilmente essere `_get_supercell_transform_matrix`.
-7. **`parse_vasp.py` Selective dynamics**: la gestione è fragile; dopo una riga `Selective dynamics`, legge il tipo coordinate successivo, ma il ramo `elif coords_type.startswith("s")` resta nel codice e può lasciare `positions` non definito in casi anomali.
-8. **`find_primitive_cell`**: se l'input è già primitivo solleva errore. Verificare se questo è desiderato per i workflow di mapping.
-9. **Temperature API**: `calculate_temperature` calcola e logga `reconstructed_temperature`, ma non la restituisce; valutare se aggiungerla al dizionario risultati.
-10. **Logging**:
+6. **`parse_vasp.py` Selective dynamics**: la gestione è fragile; dopo una riga `Selective dynamics`, legge il tipo coordinate successivo, ma il ramo `elif coords_type.startswith("s")` resta nel codice e può lasciare `positions` non definito in casi anomali.
+7. **`find_primitive_cell`**: se l'input è già primitivo solleva errore. Verificare se questo è desiderato per i workflow di mapping.
+8. **Temperature API**: `calculate_temperature` calcola e logga `reconstructed_temperature`, ma non la restituisce; valutare se aggiungerla al dizionario risultati.
+9. **Logging**:
    - typo in messaggi tipo `Succesfully`.
    - in `phonon_temperatures.py` il messaggio `logger.info` sembra mancare una parentesi `)` nel testo formattato.
-11. **Type hints**:
+10. **Type hints**:
    - `parseval_tolerance` documentato come opzionale/`None`, ma annotato `float`.
    - alcuni return/import usano `np.ndarray` generico invece di `NDArray[...]`.
 
