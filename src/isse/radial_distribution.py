@@ -51,10 +51,9 @@ def calculate_rdf(
         Dictionary containing:
 
         - ``"r"``: bin centers, shape ``(nbins,)``;
-        - ``"g_r"``: total radial distribution function, shape ``(nbins,)``;
-        - ``"counts"``: total raw pair counts, shape ``(nbins,)``;
-        - ``"partial_g_r"``: optional partial RDFs keyed by species pair;
-        - ``"partial_counts"``: optional partial raw counts keyed by species pair.
+        - ``"g_r"``: total RDF, shape ``(nbins,)`` for ``Atoms`` input or
+          ``(nframes, nbins)`` for ``Trajectory`` input;
+        - ``"partial_g_r"``: optional partial RDFs keyed by species pair.
     """
     if r_max <= 0.0:
         raise ValueError(f"r_max must be positive, found {r_max}.")
@@ -67,8 +66,9 @@ def calculate_rdf(
 
     dr = r_max / n_bins
 
-    counts = np.zeros(n_bins, dtype=np.float64)
-    partial_counts: NDArray[np.float64] | None = None
+    is_single_frame = isinstance(trajectory, Atoms)
+    count_batches: list[NDArray[np.float64]] = []
+    partial_count_batches: list[NDArray[np.float64]] = []
     pair_keys: list[tuple[str, str]] = []
     pair_index: NDArray[np.int64] | None = None
     species_ids: NDArray[np.int64] | None = None
@@ -101,7 +101,6 @@ def calculate_rdf(
                 symbols,
                 species_pairs,
             )
-            partial_counts = np.zeros((len(pair_keys), n_bins), dtype=np.float64)
 
         inverse_cells = np.linalg.inv(cells)
         if NUMBA_AVAILABLE:
@@ -122,10 +121,10 @@ def calculate_rdf(
                 n_bins,
             )
 
-        counts += batch_counts
+        count_batches.append(batch_counts)
 
         if compute_partial:
-            if species_ids is None or pair_index is None or partial_counts is None:
+            if species_ids is None or pair_index is None:
                 raise RuntimeError("Partial RDF metadata was not initialized.")
             if NUMBA_AVAILABLE:
                 batch_partial_counts = _histogram_partial_rdf_numba(
@@ -150,20 +149,25 @@ def calculate_rdf(
                     n_bins,
                     len(pair_keys),
                 )
-            partial_counts += batch_partial_counts
+            partial_count_batches.append(batch_partial_counts)
         volumes.extend(np.abs(np.linalg.det(cells)).tolist())
         nframes += positions.shape[0]
 
     if natoms is None or nframes == 0:
         raise ValueError("No trajectory frames were read.")
 
+    counts = np.concatenate(count_batches, axis=0)
+    volumes_array = np.asarray(volumes, dtype=np.float64)
+
     r, g_r = _normalize_rdf(
         counts=counts,
         natoms=natoms,
-        nframes=nframes,
-        volumes=np.asarray(volumes, dtype=np.float64),
+        volumes=volumes_array,
         dr=dr,
     )
+
+    if is_single_frame:
+        g_r = g_r[0]
 
     results: dict[
         str,
@@ -171,25 +175,24 @@ def calculate_rdf(
     ] = {
         "r": r,
         "g_r": g_r,
-        "counts": counts,
     }
 
     if compute_partial:
-        if partial_counts is None:
+        if not partial_count_batches:
             raise ValueError("No partial RDF species pairs were available.")
+        partial_counts = np.concatenate(partial_count_batches, axis=0)
         partial_g_r = _normalize_partial_rdf(
             counts=partial_counts,
             pair_keys=pair_keys,
             species_counts=species_counts,
-            nframes=nframes,
-            volumes=np.asarray(volumes, dtype=np.float64),
+            volumes=volumes_array,
             dr=dr,
         )
+        if is_single_frame:
+            partial_g_r = partial_g_r[0]
         results["partial_g_r"] = {
-            pair: partial_g_r[ipair] for ipair, pair in enumerate(pair_keys)
-        }
-        results["partial_counts"] = {
-            pair: partial_counts[ipair] for ipair, pair in enumerate(pair_keys)
+            pair: partial_g_r[..., ipair, :]
+            for ipair, pair in enumerate(pair_keys)
         }
 
     return results
@@ -332,18 +335,19 @@ def _histogram_rdf_numpy(
     atom ``j`` sees atom ``i``.
     """
     nframes, natoms, _ = positions.shape
-    counts = np.zeros(nbins, dtype=np.float64)
+    counts = np.zeros((nframes, nbins), dtype=np.float64)
 
     for iframe in range(nframes):
         frame_positions = positions[iframe]
         cell = cells[iframe]
+        frame_counts = counts[iframe]
 
         for iatom in range(natoms - 1):
             displacements = frame_positions[iatom + 1 :] - frame_positions[iatom]
             distances = minimum_image_distances(displacements, cell)
             selected = distances < r_max
             bin_indices = np.floor(distances[selected] / dr).astype(np.int64)
-            counts += 2.0 * np.bincount(bin_indices, minlength=nbins)[:nbins]
+            frame_counts += 2.0 * np.bincount(bin_indices, minlength=nbins)[:nbins]
 
     return counts
 
@@ -362,11 +366,12 @@ def _histogram_partial_rdf_numpy(
     Accumulate partial RDF pair counts using a readable NumPy fallback.
     """
     nframes, natoms, _ = positions.shape
-    counts = np.zeros((npairs, nbins), dtype=np.float64)
+    counts = np.zeros((nframes, npairs, nbins), dtype=np.float64)
 
     for iframe in range(nframes):
         frame_positions = positions[iframe]
         cell = cells[iframe]
+        frame_counts = counts[iframe]
 
         for iatom in range(natoms - 1):
             displacements = frame_positions[iatom + 1 :] - frame_positions[iatom]
@@ -381,7 +386,7 @@ def _histogram_partial_rdf_numpy(
                 if ipair < 0:
                     continue
                 ibin = int(distance / dr)
-                counts[ipair, ibin] += 2.0
+                frame_counts[ipair, ibin] += 2.0
 
     return counts
 
@@ -448,12 +453,7 @@ if NUMBA_AVAILABLE:
                         ibin = int(distance / dr)
                         frame_counts[ibin] += 2.0
 
-        counts = np.zeros(nbins, dtype=np.float64)
-        for iframe in range(nframes):
-            for ibin in range(nbins):
-                counts[ibin] += counts_by_frame[iframe, ibin]
-
-        return counts
+        return counts_by_frame
 
 
     @njit(cache=True, parallel=True)
@@ -524,32 +524,24 @@ if NUMBA_AVAILABLE:
                         ibin = int(distance / dr)
                         frame_counts[ipair, ibin] += 2.0
 
-        counts = np.zeros((npairs, nbins), dtype=np.float64)
-        for iframe in range(nframes):
-            for ipair in range(npairs):
-                for ibin in range(nbins):
-                    counts[ipair, ibin] += counts_by_frame[iframe, ipair, ibin]
-
-        return counts
+        return counts_by_frame
 
 
 def _normalize_rdf(
     counts: NDArray[np.float64],
     natoms: int,
-    nframes: int,
     volumes: NDArray[np.float64],
     dr: float,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """
-    Normalize RDF pair counts into ``g(r)``.
+    Normalize per-frame RDF pair counts into ``g(r)``.
     """
-    nbins = len(counts)
+    nbins = counts.shape[1]
     edges, shell_volumes = _rdf_edges_and_shell_volumes(nbins, dr)
     r = 0.5 * (edges[:-1] + edges[1:])
-    mean_volume = float(np.mean(volumes))
-    density = natoms / mean_volume
+    densities = natoms / volumes
 
-    normalization = nframes * natoms * density * shell_volumes
+    normalization = natoms * densities[:, np.newaxis] * shell_volumes[np.newaxis, :]
     g_r = np.divide(
         counts,
         normalization,
@@ -564,37 +556,35 @@ def _normalize_partial_rdf(
     counts: NDArray[np.float64],
     pair_keys: Sequence[tuple[str, str]],
     species_counts: dict[str, int],
-    nframes: int,
     volumes: NDArray[np.float64],
     dr: float,
 ) -> NDArray[np.float64]:
     """
-    Normalize partial RDF pair counts into species-resolved ``g_ab(r)``.
+    Normalize per-frame partial RDF counts into species-resolved ``g_ab(r)``.
 
     Counts are accumulated as ordered neighbor counts: each unordered pair
     contributes ``2`` counts. For cross pairs this is normalized by the sum of
     the two directional ideal-gas counts, ``N_a rho_b + N_b rho_a``.
     """
-    npairs, nbins = counts.shape
+    nframes, npairs, nbins = counts.shape
     _, shell_volumes = _rdf_edges_and_shell_volumes(nbins, dr)
-    mean_volume = float(np.mean(volumes))
-    g_r = np.zeros((npairs, nbins), dtype=np.float64)
+    g_r = np.zeros((nframes, npairs, nbins), dtype=np.float64)
 
     for ipair, (first, second) in enumerate(pair_keys):
         n_first = species_counts[first]
         n_second = species_counts[second]
         if first == second:
-            prefactor = n_first * (n_first / mean_volume)
+            prefactors = n_first * (n_first / volumes)
         else:
-            prefactor = (
-                n_first * (n_second / mean_volume)
-                + n_second * (n_first / mean_volume)
+            prefactors = (
+                n_first * (n_second / volumes)
+                + n_second * (n_first / volumes)
             )
-        normalization = nframes * prefactor * shell_volumes
-        g_r[ipair] = np.divide(
-            counts[ipair],
+        normalization = prefactors[:, np.newaxis] * shell_volumes[np.newaxis, :]
+        g_r[:, ipair, :] = np.divide(
+            counts[:, ipair, :],
             normalization,
-            out=np.zeros(nbins, dtype=np.float64),
+            out=np.zeros((nframes, nbins), dtype=np.float64),
             where=normalization > 0.0,
         )
 
