@@ -238,6 +238,7 @@ def _read_frame_gpumd_dump(filepath: Path, offset: int) -> Atoms:
         symbols=atom_symbols,
         cell=cell,
         positions=positions,
+        unwrapped_positions=unwrapped_positions if has_unwrapped_positions else None,
         velocities=velocities if has_velocities else None,
         masses=masses if has_masses else None,
         forces=forces if has_forces else None,
