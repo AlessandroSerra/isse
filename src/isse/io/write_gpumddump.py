@@ -46,7 +46,7 @@ def write_gpumd_dump(
             lattice = " ".join(f"{value:.16g}" for value in atoms.cell.reshape(-1))
             file.write(f"{len(atoms)}\n")
             file.write(
-                f'Lattice="{lattice}" Properties="{":".join(properties)}" '
+                f'Lattice="{lattice}" Properties={":".join(properties)} '
                 f"Time={timestep}\n"
             )
 
