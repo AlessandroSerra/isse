@@ -9,12 +9,13 @@ The project provides lightweight atomistic data structures, lazy trajectory I/O,
 ## Features
 
 - `Atoms`: a compact container for one atomistic configuration.
-- `Trajectory`: lazy, file-backed access to multi-frame trajectories.
+- `Trajectory`: lazy, file-backed access to single-file or multi-file trajectories.
 - Native readers and writers for selected VASP, LAMMPS, and GPUMD/extended-XYZ files.
 - Explicit unit handling for LAMMPS `metal` and `real` unit styles.
 - Dependency-light conversion utilities without ASE.
 - Phonon modal temperature workflow using ALAMODE eigenvector files.
 - Radial distribution function calculation with optional Numba acceleration.
+- Velocity autocorrelation and vibrational density of states utilities.
 - Periodic-boundary utilities for wrapping, unwrapping, and minimum-image distances.
 
 ## Installation
@@ -138,6 +139,25 @@ print(len(trajectory))      # number of frames
 frame0 = trajectory[0]      # only this frame is read from disk
 for frame in trajectory[:10]:
     print(frame.positions.shape)
+```
+
+### Concatenate trajectory segments lazily
+
+Trajectory segments read with the same parser can be concatenated without
+loading frames into memory:
+
+```python
+from isse.io.parse_gpumddump import parse_gpumd_dump
+
+trajectory = sum([
+    parse_gpumd_dump("traj2ps.xyz"),
+    parse_gpumd_dump("traj10ps.xyz"),
+    parse_gpumd_dump("traj30ps.xyz"),
+])
+
+print(len(trajectory))
+print(trajectory.paths)     # all backing files
+frame = trajectory[-1]      # only this frame is read
 ```
 
 ### Convert files
