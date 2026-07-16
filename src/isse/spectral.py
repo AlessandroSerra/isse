@@ -9,7 +9,7 @@ from .constants import HZ_TO_CM, PS_TO_FS, masses_from_symbols
 from .structures import Trajectory
 
 try:
-    from numba import njit
+    from numba import njit, prange
 
     NUMBA_AVAILABLE = True
 except ImportError:
@@ -494,7 +494,7 @@ def _filon_cosine_transform_numba(
 
     t_max = float(n_intervals) * dt
 
-    for nu in range(n_intervals + 1):
+    for nu in prange(n_intervals + 1):
         omega = float(nu) * delta_omega
         theta = omega * dt
         sin_theta = np.sin(theta)
@@ -540,6 +540,8 @@ def _filon_cosine_transform_numba(
 
 
 if NUMBA_AVAILABLE:
-    _filon_cosine_transform = njit(cache=True)(_filon_cosine_transform_numba)
+    _filon_cosine_transform = njit(cache=True, parallel=True)(
+        _filon_cosine_transform_numba
+    )
 else:
     _filon_cosine_transform = _filon_cosine_transform_numpy
